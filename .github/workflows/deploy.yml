@@ -1,0 +1,27 @@
+name: Deploy MimiBot to VibeHost
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    name: Deploy Application
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: SFTP Deploy to VibeHost
+        uses: wlixcc/SFTP-Deploy-Action@v1.2.6
+        with:
+          server: 'hcm3.vibehost.vn'
+          port: 2022
+          username: 'nhan98-889566.9d9f7a18'
+          password: ${{ secrets.SFTP_PASSWORD }}
+          local_path: './'
+          remote_path: './'
+          sftp_only: true
+          sftp_args: '-o ConnectTimeout=5'
+          args: '--exclude=node_modules --exclude=.git --exclude=.github --exclude=created_channels.json --exclude=*.tmp --exclude=*.log --exclude=*.json.tmp'
