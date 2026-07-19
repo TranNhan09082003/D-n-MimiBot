@@ -1,8 +1,9 @@
-const { 
-    Client, GatewayIntentBits, ChannelType, PermissionFlagsBits, 
-    SlashCommandBuilder, REST, Routes, EmbedBuilder, ActionRowBuilder, 
+const {
+    Client, GatewayIntentBits, ChannelType, PermissionFlagsBits,
+    SlashCommandBuilder, REST, Routes, EmbedBuilder, ActionRowBuilder,
     ButtonBuilder, ButtonStyle, AttachmentBuilder, ModalBuilder, TextInputBuilder, TextInputStyle,
-    Partials, StringSelectMenuBuilder, StringSelectMenuOptionBuilder
+    Partials, StringSelectMenuBuilder, StringSelectMenuOptionBuilder,
+    ContainerBuilder, TextDisplayBuilder, SectionBuilder, SeparatorBuilder, SeparatorSpacingSize, ThumbnailBuilder, MessageFlags
 } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
@@ -363,6 +364,7 @@ function saveEconomy() {
 // 📈 SERVICE TÍNH TOÁN VÀ THĂNG CẤP XP
 // -----------------------------------------------------------------
 const MAX_LEVEL = 9999;
+const XP_PER_LEVEL = 5000; // Cố định 5.000 XP cho mỗi cấp
 
 function checkLevelUp(currentXp, currentLevel) {
     let xp = currentXp;
@@ -370,7 +372,7 @@ function checkLevelUp(currentXp, currentLevel) {
     let leveledUp = false;
 
     while (level < MAX_LEVEL) {
-        const xpNeeded = Math.max(500000, level * 500000);
+        const xpNeeded = XP_PER_LEVEL;
         if (xp >= xpNeeded) {
             xp -= xpNeeded;
             level++;
@@ -2025,7 +2027,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
                 name: roomName,
                 type: ChannelType.GuildVoice,
                 parent: category ? category.id : undefined,
-                userLimit: 5,
+                userLimit: 0, // Mặc định không giới hạn thành viên
                 permissionOverwrites: [
                     {
                         id: member.id,
@@ -2989,30 +2991,49 @@ client.on('messageCreate', async (message) => {
     // 2. Lệnh xem hồ sơ: miprofile hoặc mip
     if (command === 'miprofile' || command === 'mip') {
         const userData = getUserData(userId);
-        const xpNeeded = Math.max(500000, userData.level * 500000);
+        const xpNeeded = XP_PER_LEVEL;
         const userAvatar = message.author.displayAvatarURL({ dynamic: true, size: 256 });
-
-        const profileEmbed = buildBaseEmbed(
-            `📊 HỒ SƠ TOÀN CẦU CỦA ${message.author.username.toUpperCase()}`,
-            `### 👤 **Thông tin tài khoản:**\n` +
-            `> Thành viên: ${message.author} (\`${message.author.id}\`)\n\n` +
-            `**Chi tiết tài sản & tiến trình:**\n` +
-            `- 🌟 Cấp độ: \`Level ${userData.level}\`\n` +
-            `- 💰 Ví tiền: \`${userData.balance.toLocaleString()} xu\`\n` +
-            `- ✨ Kinh nghiệm: \`${userData.xp.toLocaleString()} / ${xpNeeded.toLocaleString()} XP\`\n` +
-            `  ${generateProgressBar(userData.xp, xpNeeded, 10)}`,
-            'THEME',
-            client.user
-        ).setThumbnail(userAvatar);
 
         const row = new ActionRowBuilder().addComponents(
             new ButtonBuilder().setCustomId('profile_give').setLabel('💸 Chuyển Xu').setStyle(ButtonStyle.Primary),
             new ButtonBuilder().setCustomId('profile_shop').setLabel('🛒 Mua Sắm').setStyle(ButtonStyle.Secondary)
         );
 
+        const profileContainer = new ContainerBuilder()
+            .setAccentColor(0x2F3136)
+            .addSectionComponents(
+                new SectionBuilder()
+                    .addTextDisplayComponents(
+                        new TextDisplayBuilder().setContent(
+                            `## 📊 HỒ SƠ TOÀN CẦU CỦA ${message.author.username.toUpperCase()}\n` +
+                            `### 👤 Thông tin tài khoản\n` +
+                            `> Thành viên: ${message.author} (\`${message.author.id}\`)`
+                        )
+                    )
+                    .setThumbnailAccessory(
+                        new ThumbnailBuilder().setURL(userAvatar)
+                    )
+            )
+            .addSeparatorComponents(
+                new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
+            )
+            .addTextDisplayComponents(
+                new TextDisplayBuilder().setContent(
+                    `**Chi tiết tài sản & tiến trình:**\n` +
+                    `- 🌟 Cấp độ: \`Level ${userData.level}\`\n` +
+                    `- 💰 Ví tiền: \`${userData.balance.toLocaleString()} xu\`\n` +
+                    `- ✨ Kinh nghiệm: \`${userData.xp.toLocaleString()} / ${xpNeeded.toLocaleString()} XP\`\n` +
+                    `  ${generateProgressBar(userData.xp, xpNeeded, 10)}`
+                )
+            )
+            .addSeparatorComponents(
+                new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
+            )
+            .addActionRowComponents(row);
+
         return message.reply({
-            embeds: [profileEmbed],
-            components: [row],
+            components: [profileContainer],
+            flags: MessageFlags.IsComponentsV2,
             allowedMentions: { repliedUser: false }
         });
     }
@@ -3658,9 +3679,19 @@ client.on('messageCreate', async (message) => {
         const xpResult = addXp(userId, xpGain);
 
         if (xpResult.leveledUp) {
-            message.reply({ 
-                content: `# 🎉 THĂNG CẤP!\n> Chúc mừng ${message.author} đã đạt **Level ${xpResult.newLevel}**!\n- 💰 Thưởng nóng: **+${xpResult.levelBonus.toLocaleString()} xu**`,
-                allowedMentions: { repliedUser: false } 
+            const levelUpContainer = new ContainerBuilder()
+                .setAccentColor(0xF1C40F)
+                .addTextDisplayComponents(
+                    new TextDisplayBuilder().setContent(
+                        `# 🎉 THĂNG CẤP!\n` +
+                        `> Chúc mừng ${message.author} đã đạt **Level ${xpResult.newLevel}**!\n` +
+                        `- 💰 Thưởng nóng: **+${xpResult.levelBonus.toLocaleString()} xu**`
+                    )
+                );
+            message.reply({
+                components: [levelUpContainer],
+                flags: MessageFlags.IsComponentsV2,
+                allowedMentions: { repliedUser: false }
             }).catch(() => null);
         }
     }
@@ -4538,10 +4569,34 @@ client.on('interactionCreate', async interaction => {
                 for (const uid in economyData) {
                     if (uid === OWNER_ID) continue;
                     economyData[uid].balance = 0;
+                    economyData[uid].xp = 0;
+                    economyData[uid].level = 1;
                     count++;
                 }
                 saveEconomy();
-                return interaction.editReply({ content: `✅ Đã xóa xu của **${count} người dùng**.\n(Xu của Owner được bảo toàn.)` });
+
+                const resetContainer = new ContainerBuilder()
+                    .setAccentColor(0x2ECC71)
+                    .addTextDisplayComponents(
+                        new TextDisplayBuilder().setContent('## ✅ Đã Reset Toàn Bộ')
+                    )
+                    .addSeparatorComponents(
+                        new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
+                    )
+                    .addTextDisplayComponents(
+                        new TextDisplayBuilder().setContent(
+                            `Đã xóa **xu** và **XP/cấp độ** của **${count} người dùng**.\n` +
+                            `- 💰 Xu → **0**\n` +
+                            `- ✨ XP → **0**\n` +
+                            `- 🌟 Cấp độ → **Level 1**\n\n` +
+                            `> 👑 Dữ liệu của Owner được bảo toàn.`
+                        )
+                    );
+
+                return interaction.editReply({
+                    components: [resetContainer],
+                    flags: MessageFlags.IsComponentsV2
+                });
             }
         }
 
@@ -6249,16 +6304,6 @@ client.on('interactionCreate', async interaction => {
                 const isLocked = everyoneOverwrite?.deny.has(PermissionFlagsBits.Connect) || false;
                 const isHidden = everyoneOverwrite?.deny.has(PermissionFlagsBits.ViewChannel) || false;
 
-                const settingsEmbed = new EmbedBuilder()
-                    .setColor('#5865F2')
-                    .setTitle(`⚙️ Quản Lý: ${voiceChannel.name}`)
-                    .setDescription(
-                        `👑 Chủ phòng: <@${ownerId}>\n` +
-                        `👥 Giới hạn hiện tại: **${voiceChannel.userLimit === 0 ? 'Không giới hạn' : voiceChannel.userLimit}**\n` +
-                        `🔒 Trạng thái khóa: **${isLocked ? 'Đã khóa' : 'Đang mở'}**\n` +
-                        `🙈 Trạng thái ẩn: **${isHidden ? 'Đã ẩn' : 'Đang hiện'}**`
-                    );
-
                 const vrRow1 = new ActionRowBuilder().addComponents(
                     new ButtonBuilder().setCustomId(`vr_lock:${voiceChannel.id}`).setLabel(isLocked ? '🔓 Mở Phòng' : '🔒 Khóa Phòng').setStyle(isLocked ? ButtonStyle.Success : ButtonStyle.Danger),
                     new ButtonBuilder().setCustomId(`vr_hide:${voiceChannel.id}`).setLabel(isHidden ? '👁️ Hiện Phòng' : '🙈 Ẩn Phòng').setStyle(isHidden ? ButtonStyle.Success : ButtonStyle.Secondary),
@@ -6272,7 +6317,29 @@ client.on('interactionCreate', async interaction => {
                     new ButtonBuilder().setLabel('🌐 Máy Chủ Hỗ Trợ').setStyle(ButtonStyle.Link).setURL(SUPPORT_LINK)
                 );
 
-                return interaction.reply({ embeds: [settingsEmbed], components: [vrRow1, vrRow2], ephemeral: true });
+                const settingsContainer = new ContainerBuilder()
+                    .setAccentColor(0x5865F2)
+                    .addTextDisplayComponents(
+                        new TextDisplayBuilder().setContent(`## ⚙️ Quản Lý Phòng: ${voiceChannel.name}`)
+                    )
+                    .addSeparatorComponents(
+                        new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
+                    )
+                    .addTextDisplayComponents(
+                        new TextDisplayBuilder().setContent(
+                            `👑 Chủ phòng: <@${ownerId}>\n` +
+                            `👥 Giới hạn hiện tại: **${voiceChannel.userLimit === 0 ? 'Không giới hạn' : voiceChannel.userLimit}**\n` +
+                            `🔒 Trạng thái khóa: **${isLocked ? 'Đã khóa' : 'Đang mở'}**\n` +
+                            `🙈 Trạng thái ẩn: **${isHidden ? 'Đã ẩn' : 'Đang hiện'}**`
+                        )
+                    )
+                    .addSeparatorComponents(
+                        new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
+                    )
+                    .addActionRowComponents(vrRow1)
+                    .addActionRowComponents(vrRow2);
+
+                return interaction.reply({ components: [settingsContainer], flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral });
             }
 
             // ==========================================
