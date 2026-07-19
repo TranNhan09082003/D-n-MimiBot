@@ -367,24 +367,32 @@ function saveEconomy() {
 // 📈 SERVICE TÍNH TOÁN VÀ THĂNG CẤP XP
 // -----------------------------------------------------------------
 const MAX_LEVEL = 9999;
-const XP_PER_LEVEL = 5000; // Cố định 5.000 XP cho mỗi cấp
+const XP_PER_LEVEL = 5000; // Đơn vị XP mỗi bậc: cấp bắt đầu từ 0
+
+// XP cần để vượt qua cấp hiện tại: 5.000 × (cấp + 1)
+// -> cấp 0 cần 5.000 (đạt cấp 1), cấp 1 cần 10.000 (đạt cấp 2), ...
+function xpNeededForLevel(level) {
+    return XP_PER_LEVEL * (level + 1);
+}
 
 function checkLevelUp(currentXp, currentLevel) {
     let xp = currentXp;
     let level = currentLevel;
     let leveledUp = false;
+    let bonusEarned = 0;
 
     while (level < MAX_LEVEL) {
-        const xpNeeded = XP_PER_LEVEL;
+        const xpNeeded = xpNeededForLevel(level);
         if (xp >= xpNeeded) {
             xp -= xpNeeded;
             level++;
             leveledUp = true;
+            bonusEarned += XP_PER_LEVEL * level; // Xu thưởng = 5.000 × cấp vừa đạt
         } else {
             break;
         }
     }
-    return { leveledUp, level, remainingXp: xp };
+    return { leveledUp, level, remainingXp: xp, bonusEarned };
 }
 
 function addXp(userId, amount) {
@@ -404,7 +412,7 @@ function addXp(userId, amount) {
         user.level = check.level;
         user.xp = check.remainingXp;
 
-        const levelBonus = 5000 * levelsGained;
+        const levelBonus = check.bonusEarned; // Tổng xu thưởng = Σ (5.000 × mỗi cấp đạt được)
         if (userId === OWNER_ID) {
             user.balance = MAX_BALANCE;
         } else {
@@ -698,7 +706,7 @@ function getUserData(userId) {
         economyData[userId] = {
             userId: userId,
             xp: 0,
-            level: 1,
+            level: 0,
             balance: userId === OWNER_ID ? MAX_BALANCE : 100,
             lastDaily: ""
         };
@@ -3349,7 +3357,7 @@ client.on('messageCreate', async (message) => {
     // 2. Lệnh xem hồ sơ: miprofile hoặc mip
     if (command === 'miprofile' || command === 'mip') {
         const userData = getUserData(userId);
-        const xpNeeded = XP_PER_LEVEL;
+        const xpNeeded = xpNeededForLevel(userData.level);
         const userAvatar = message.author.displayAvatarURL({ dynamic: true, size: 256 });
 
         const row = new ActionRowBuilder().addComponents(
@@ -4988,7 +4996,7 @@ client.on('interactionCreate', async interaction => {
                     if (uid === OWNER_ID) continue;
                     economyData[uid].balance = 0;
                     economyData[uid].xp = 0;
-                    economyData[uid].level = 1;
+                    economyData[uid].level = 0;
                     count++;
                 }
                 saveEconomy();
@@ -5006,7 +5014,7 @@ client.on('interactionCreate', async interaction => {
                             `Đã xóa **xu** và **XP/cấp độ** của **${count} người dùng**.\n` +
                             `- 💰 Xu → **0**\n` +
                             `- ✨ XP → **0**\n` +
-                            `- 🌟 Cấp độ → **Level 1**\n\n` +
+                            `- 🌟 Cấp độ → **Level 0**\n\n` +
                             `> 👑 Dữ liệu của Owner được bảo toàn.`
                         )
                     );
