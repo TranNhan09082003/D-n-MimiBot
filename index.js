@@ -8,6 +8,7 @@ const {
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
+const { PassThrough } = require('stream');
 const { colors, buildBaseEmbed, generateProgressBar } = require('./uiBuilder');
 
 // -----------------------------------------------------------------
@@ -1789,6 +1790,11 @@ function killCurrentProcess(mq) {
         try { mq.currentProcess.kill('SIGKILL'); } catch { /* đã thoát rồi thì bỏ qua */ }
     }
     mq.currentProcess = null;
+    // Hủy bộ đệm PassThrough của bài cũ (nếu có) để giải phóng bộ nhớ ngay
+    if (mq?.currentBuffer) {
+        try { mq.currentBuffer.destroy(); } catch { /* đã hủy rồi thì bỏ qua */ }
+        mq.currentBuffer = null;
+    }
 }
 
 // Phát bài tiếp theo trong hàng đợi (tự động gọi khi player Idle hoặc khi bắt đầu /play)
@@ -1837,7 +1843,8 @@ async function playNextTrack(guildId) {
             noWarnings: true,
             noCheckCertificates: true,
             quiet: true,
-            limitRate: '500K'
+            // Đệm sẵn dữ liệu ở phía yt-dlp trước khi đẩy ra stdout, giúp stream ổn định hơn
+            bufferSize: '16K'
         }, { stdio: ['ignore', 'pipe', 'pipe'] });
 
         let stderrBuffer = '';
@@ -1862,7 +1869,17 @@ async function playNextTrack(guildId) {
 
         mq.currentProcess = ytdlProcess;
 
-        const resource = voiceLib.createAudioResource(ytdlProcess.stdout, { inputType: voiceLib.StreamType.WebmOpus, inlineVolume: true });
+        // Chèn bộ đệm PassThrough (~4MB) giữa yt-dlp và AudioPlayer.
+        // yt-dlp tải nhanh và đổ dữ liệu vào đây; player đọc ra với nhịp ổn định.
+        // Khi mạng/host chậm 1 nhịp, player vẫn còn dữ liệu trong buffer để phát tiếp,
+        // tránh hiện tượng "đói stream" gây giật/văng ngang.
+        const audioBuffer = new PassThrough({ highWaterMark: 1 << 22 });
+        ytdlProcess.stdout.pipe(audioBuffer);
+        // Nếu stdout lỗi thì hủy buffer để không treo tiến trình
+        ytdlProcess.stdout.on('error', () => audioBuffer.destroy());
+        mq.currentBuffer = audioBuffer;
+
+        const resource = voiceLib.createAudioResource(audioBuffer, { inputType: voiceLib.StreamType.WebmOpus, inlineVolume: true });
         resource.volume.setVolume(mq.volume);
         mq.currentResource = resource;
         mq.player.play(resource);
@@ -1934,7 +1951,7 @@ async function getOrCreateMusicQueue(guild, voiceChannel, textChannel) {
         connection, player,
         voiceChannelId: voiceChannel.id,
         textChannel,
-        queue: [], current: null, currentResource: null, currentProcess: null,
+        queue: [], current: null, currentResource: null, currentProcess: null, currentBuffer: null,
         volume: 0.5, loop: 'off',
         nowPlayingMessage: null, idleTimeout: null
     };
@@ -6393,8 +6410,8 @@ client.on('interactionCreate', async interaction => {
                 if (vrAction === 'vr_limit') {
                     const modal = new ModalBuilder().setCustomId(`vr_limit_modal:${voiceChannel.id}`).setTitle('Giới Hạn Thành Viên Phòng');
                     const limitInput = new TextInputBuilder()
-                        .setCustomId('vr_new_limit').setLabel('Số người tối đa (0 = không giới hạn, tối đa 99)')
-                        .setStyle(TextInputStyle.Short).setValue(String(voiceChannel.userLimit || 0)).setMaxLength(2).setRequired(true);
+                        .setCustomId('vr_new_limit').setLabel('Số người tối đa (0 = không giới hạn)')
+                        .setStyle(TextInputStyle.Short).setPlaceholder('Nhập 0 đến 99').setValue(String(voiceChannel.userLimit || 0)).setMaxLength(2).setRequired(true);
                     modal.addComponents(new ActionRowBuilder().addComponents(limitInput));
                     return interaction.showModal(modal);
                 }
