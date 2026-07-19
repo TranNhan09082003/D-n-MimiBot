@@ -8,7 +8,7 @@ const {
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
-const { PassThrough } = require('stream');
+const { PassThrough, Readable } = require('stream');
 const { colors, buildBaseEmbed, generateProgressBar } = require('./uiBuilder');
 
 // -----------------------------------------------------------------
@@ -141,7 +141,9 @@ function getGuildConfig(guildId) {
             bannedWordsChannelId: "",
             bannedWords: [],
             unverifyOnMute: false,
-            donateChannelId: ""
+            donateChannelId: "",
+            isTtsSetup: false,
+            ttsChannelId: ""
         };
         saveConfig(); // Lưu ngay vào file config.json
         console.log(`✅ Đã khởi tạo cấu hình mới cho server: ${guildId}`);
@@ -1583,6 +1585,25 @@ try { ytDlpExec = require('yt-dlp-exec'); } catch {
 }
 
 // -----------------------------------------------------------------
+// 🔊 THƯ VIỆN ĐỌC TIN NHẮN (TTS) — Google TTS + ffmpeg-static
+// google-tts-api tạo URL/base64 MP3 (giới hạn ~200 ký tự/lần).
+// Phát MP3 qua @discordjs/voice CẦN ffmpeg — trỏ FFMPEG_PATH vào ffmpeg-static
+// để voice tự tìm thấy mà không cần cài ffmpeg riêng trên host.
+// -----------------------------------------------------------------
+let googleTTS = null;
+try {
+    googleTTS = require('google-tts-api');
+} catch {
+    console.warn('⚠️ [TTS] Chưa cài google-tts-api — tính năng đọc tin nhắn sẽ không hoạt động.');
+}
+try {
+    const ffmpegPath = require('ffmpeg-static');
+    if (ffmpegPath) process.env.FFMPEG_PATH = ffmpegPath;
+} catch {
+    console.warn('⚠️ [TTS] Chưa cài ffmpeg-static — tính năng đọc tin nhắn có thể không phát được âm thanh.');
+}
+
+// -----------------------------------------------------------------
 // 🔧 TỰ ĐỘNG TẢI BINARY yt-dlp NẾU BỊ THIẾU
 // Nguyên nhân lỗi "spawn .../yt-dlp-exec/bin/yt-dlp ENOENT": gói yt-dlp-exec cài qua npm
 // THÀNH CÔNG nhưng script postinstall (tải file thực thi yt-dlp) đã KHÔNG chạy được —
@@ -1656,7 +1677,11 @@ ensureYtDlpBinary().catch(() => null);
 // guildId -> { connection, player, voiceChannelId, textChannel, queue, current, currentResource, currentProcess, volume, loop, nowPlayingMessage, idleTimeout }
 const musicQueues = new Map();
 
+// guildId -> { connection, player, voiceChannelId, queue, speaking, idleTimeout }
+const ttsQueues = new Map();
+
 function isMusicReady() { return !!(voiceLib && ytDlpExec); }
+function isTtsReady() { return !!(voiceLib && googleTTS); }
 
 function formatDuration(seconds) {
     if (!seconds || seconds <= 0) return 'Trực tiếp/??:??';
@@ -1988,21 +2013,192 @@ async function getOrCreateMusicQueue(guild, voiceChannel, textChannel) {
     return { mq };
 }
 
+// -----------------------------------------------------------------
+// 🔊 HỆ THỐNG ĐỌC TIN NHẮN (TTS) — phát tuần tự trong kênh thoại
+// -----------------------------------------------------------------
+const TTS_MAX_LEN = 500;      // Giới hạn ký tự mỗi tin để tránh spam / đọc quá dài
+const TTS_IDLE_MS = 120000;   // Tự rời kênh sau 2 phút không có tin mới
+
+// Chuẩn hóa nội dung tin nhắn thành text đọc được: bỏ link, chuyển mention thành tên,
+// bỏ custom emoji, gộp khoảng trắng. Trả về '' nếu không có gì để đọc.
+function sanitizeTtsText(message) {
+    let text = message.content || '';
+    // Thay mention người dùng bằng displayName
+    text = text.replace(/<@!?(\d+)>/g, (_, id) => {
+        const m = message.guild?.members?.cache?.get(id);
+        return m ? m.displayName : 'ai đó';
+    });
+    // Thay mention kênh / role
+    text = text.replace(/<#(\d+)>/g, 'một kênh').replace(/<@&(\d+)>/g, 'một vai trò');
+    // Bỏ custom emoji <:name:id> / <a:name:id> -> đọc tên emoji
+    text = text.replace(/<a?:(\w+):\d+>/g, '$1');
+    // Bỏ link http/https
+    text = text.replace(/https?:\/\/\S+/gi, '');
+    // Gộp khoảng trắng
+    text = text.replace(/\s+/g, ' ').trim();
+    return text.slice(0, TTS_MAX_LEN);
+}
+
+// Lấy hàng đợi TTS hiện có hoặc tạo kết nối voice mới cho server.
+// Trả về { tq } hoặc { error }.
+async function getOrCreateTtsQueue(guild, voiceChannel) {
+    let tq = ttsQueues.get(guild.id);
+    if (tq && tq.connection && tq.connection.state.status !== voiceLib.VoiceConnectionStatus.Destroyed) {
+        // Nếu người dùng ở kênh thoại khác kênh bot đang đứng -> chuyển bot sang (nếu kênh cũ trống)
+        if (tq.voiceChannelId !== voiceChannel.id) {
+            const oldChannel = guild.channels.cache.get(tq.voiceChannelId);
+            const stillHasListeners = oldChannel && oldChannel.members.filter(m => !m.user.bot).size > 0;
+            if (!stillHasListeners) {
+                voiceLib.joinVoiceChannel({
+                    channelId: voiceChannel.id,
+                    guildId: guild.id,
+                    adapterCreator: guild.voiceAdapterCreator,
+                    selfDeaf: true
+                });
+                tq.voiceChannelId = voiceChannel.id;
+            }
+        }
+        return { tq };
+    }
+
+    const connection = voiceLib.joinVoiceChannel({
+        channelId: voiceChannel.id,
+        guildId: guild.id,
+        adapterCreator: guild.voiceAdapterCreator,
+        selfDeaf: true
+    });
+
+    const player = voiceLib.createAudioPlayer({ behaviors: { noSubscriber: voiceLib.NoSubscriberBehavior.Pause } });
+    connection.subscribe(player);
+
+    tq = {
+        connection, player,
+        voiceChannelId: voiceChannel.id,
+        queue: [],        // mảng các mảng base64 (mỗi tin = 1 hoặc nhiều đoạn)
+        speaking: false,
+        idleTimeout: null
+    };
+    ttsQueues.set(guild.id, tq);
+
+    player.on(voiceLib.AudioPlayerStatus.Idle, () => playNextTtsChunk(guild.id));
+    player.on('error', (err) => {
+        console.error(`❌ [TTS] Player error ở server ${guild.id}:`, err.message);
+        playNextTtsChunk(guild.id);
+    });
+    connection.on(voiceLib.VoiceConnectionStatus.Disconnected, async () => {
+        try {
+            await Promise.race([
+                voiceLib.entersState(connection, voiceLib.VoiceConnectionStatus.Signalling, 5000),
+                voiceLib.entersState(connection, voiceLib.VoiceConnectionStatus.Connecting, 5000),
+            ]);
+        } catch {
+            try { connection.destroy(); } catch {}
+            ttsQueues.delete(guild.id);
+        }
+    });
+
+    try {
+        await voiceLib.entersState(connection, voiceLib.VoiceConnectionStatus.Ready, 15000);
+    } catch (err) {
+        try { connection.destroy(); } catch {}
+        ttsQueues.delete(guild.id);
+        return { error: '❌ Không thể kết nối vào kênh thoại (quá thời gian chờ).' };
+    }
+
+    return { tq };
+}
+
+// Phát đoạn TTS tiếp theo trong hàng đợi. Mỗi phần tử queue là 1 đoạn base64 MP3.
+function playNextTtsChunk(guildId) {
+    const tq = ttsQueues.get(guildId);
+    if (!tq) return;
+
+    const nextB64 = tq.queue.shift();
+    if (!nextB64) {
+        // Hết hàng đợi -> hẹn giờ tự rời kênh nếu không có tin mới
+        tq.speaking = false;
+        if (tq.idleTimeout) clearTimeout(tq.idleTimeout);
+        tq.idleTimeout = setTimeout(() => {
+            const t = ttsQueues.get(guildId);
+            if (t && t.queue.length === 0) {
+                try { t.connection.destroy(); } catch {}
+                ttsQueues.delete(guildId);
+            }
+        }, TTS_IDLE_MS);
+        return;
+    }
+
+    if (tq.idleTimeout) { clearTimeout(tq.idleTimeout); tq.idleTimeout = null; }
+    tq.speaking = true;
+
+    try {
+        const buffer = Buffer.from(nextB64, 'base64');
+        const stream = Readable.from(buffer);
+        const resource = voiceLib.createAudioResource(stream, { inputType: voiceLib.StreamType.Arbitrary });
+        tq.player.play(resource);
+    } catch (err) {
+        console.error(`❌ [TTS] Lỗi phát đoạn ở server ${guildId}:`, err.message);
+        // Bỏ qua đoạn lỗi, thử đoạn kế tiếp
+        playNextTtsChunk(guildId);
+    }
+}
+
+// Đưa một tin nhắn vào hàng đợi TTS: tạo base64 (tự cắt <=200 ký tự/đoạn) rồi phát.
+async function enqueueTts(guild, voiceChannel, text) {
+    const { tq, error } = await getOrCreateTtsQueue(guild, voiceChannel);
+    if (error) return { error };
+
+    let chunks;
+    try {
+        // getAllAudioBase64 tự cắt text dài thành nhiều đoạn <=200 ký tự
+        const results = await googleTTS.getAllAudioBase64(text, {
+            lang: 'vi',
+            slow: false,
+            splitPunct: ',.?!;:'
+        });
+        chunks = results.map(r => r.base64);
+    } catch (err) {
+        console.error(`❌ [TTS] Lỗi tạo giọng đọc ở server ${guild.id}:`, err.message);
+        return { error: '❌ Không thể tạo giọng đọc cho tin nhắn này.' };
+    }
+
+    if (!chunks || chunks.length === 0) return { error: '❌ Không có nội dung để đọc.' };
+
+    tq.queue.push(...chunks);
+    // Nếu chưa đang nói thì bắt đầu phát ngay
+    if (!tq.speaking && tq.player.state.status !== voiceLib.AudioPlayerStatus.Playing) {
+        playNextTtsChunk(guild.id);
+    }
+    return { ok: true };
+}
+
 
 client.on('voiceStateUpdate', (oldState) => {
     const guildId = oldState.guild.id;
     const mq = musicQueues.get(guildId);
-    if (!mq) return;
-    const vc = oldState.guild.channels.cache.get(mq.voiceChannelId);
-    if (!vc) return;
-    const humanMembers = vc.members.filter(m => !m.user.bot);
-    if (humanMembers.size === 0) {
-        if (mq.idleTimeout) clearTimeout(mq.idleTimeout);
-        killCurrentProcess(mq);
-        mq.player.stop();
-        mq.connection.destroy();
-        musicQueues.delete(guildId);
-        if (mq.textChannel) mq.textChannel.send('👋 Đã rời kênh thoại do không còn ai nghe nhạc.').catch(() => null);
+    // 🎵 NHẠC: rời kênh khi không còn ai nghe
+    if (mq) {
+        const vc = oldState.guild.channels.cache.get(mq.voiceChannelId);
+        if (vc && vc.members.filter(m => !m.user.bot).size === 0) {
+            if (mq.idleTimeout) clearTimeout(mq.idleTimeout);
+            killCurrentProcess(mq);
+            mq.player.stop();
+            try { mq.connection.destroy(); } catch {}
+            musicQueues.delete(guildId);
+            if (mq.textChannel) mq.textChannel.send('👋 Đã rời kênh thoại do không còn ai nghe nhạc.').catch(() => null);
+        }
+    }
+
+    // 🔊 TTS: rời kênh khi không còn ai trong kênh đọc tin
+    const tq = ttsQueues.get(guildId);
+    if (tq) {
+        const tvc = oldState.guild.channels.cache.get(tq.voiceChannelId);
+        if (tvc && tvc.members.filter(m => !m.user.bot).size === 0) {
+            if (tq.idleTimeout) clearTimeout(tq.idleTimeout);
+            try { tq.player.stop(); } catch {}
+            try { tq.connection.destroy(); } catch {}
+            ttsQueues.delete(guildId);
+        }
     }
 });
 
@@ -2228,6 +2424,13 @@ client.once('ready', async () => {
             .setDescription('Thiết lập kênh góp ý (Tách biệt /setup)')
             .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
             .addStringOption(o => o.setName('trạng_thái').setDescription('Bật hoặc Tắt hệ thống góp ý').setRequired(true)
+                .addChoices({ name: '✅ Bật', value: 'on' }, { name: '🔌 Tắt', value: 'off' })),
+
+        new SlashCommandBuilder()
+            .setName('setupdoctin')
+            .setDescription('Thiết lập kênh đọc tin nhắn bằng giọng nói TTS (Tách biệt /setup)')
+            .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
+            .addStringOption(o => o.setName('trạng_thái').setDescription('Bật hoặc Tắt hệ thống đọc tin nhắn').setRequired(true)
                 .addChoices({ name: '✅ Bật', value: 'on' }, { name: '🔌 Tắt', value: 'off' })),
 
         new SlashCommandBuilder()
@@ -2721,6 +2924,56 @@ client.on('messageCreate', async (msg) => {
         await msg.reply({ embeds: [embed], allowedMentions: { repliedUser: false } }).catch(() => null);
     } catch (err) {
         console.error('❌ [ModLog Lookup] Lỗi tra cứu lịch sử:', err.message);
+    }
+});
+
+// -----------------------------------------------------------------
+// 🔊 KÊNH ĐỌC TIN NHẮN (TTS) — ai nhắn vào kênh này, bot đọc lên trong voice
+// -----------------------------------------------------------------
+client.on('messageCreate', async (msg) => {
+    try {
+        if (msg.author.bot || !msg.guild) return;
+
+        const gConfig = getGuildConfig(msg.guild.id);
+        if (!gConfig.isTtsSetup || msg.channel.id !== gConfig.ttsChannelId) return;
+        if (!isTtsReady()) return;
+
+        // Người gửi phải đang ở trong 1 kênh thoại
+        const voiceChannel = msg.member?.voice?.channel;
+        if (!voiceChannel) {
+            await msg.react('🔇').catch(() => null); // Báo: bạn chưa vào kênh thoại
+            return;
+        }
+
+        // Bot cần quyền Kết nối + Nói ở kênh thoại đó
+        const botPerms = voiceChannel.permissionsFor(msg.guild.members.me);
+        if (!botPerms?.has(PermissionFlagsBits.Connect) || !botPerms?.has(PermissionFlagsBits.Speak)) {
+            await msg.react('⛔').catch(() => null);
+            return;
+        }
+
+        // NHẠC ƯU TIÊN: nếu server đang phát nhạc thì bỏ qua tin này để không cướp kết nối
+        const mq = musicQueues.get(msg.guild.id);
+        if (mq && mq.connection && mq.connection.state.status !== voiceLib.VoiceConnectionStatus.Destroyed) {
+            await msg.react('⏸️').catch(() => null); // Báo: bot đang bận phát nhạc
+            return;
+        }
+
+        // Chuẩn hóa nội dung, bỏ qua tin không có gì để đọc (chỉ ảnh/emoji/link)
+        const text = sanitizeTtsText(msg);
+        if (!text) {
+            await msg.react('❔').catch(() => null);
+            return;
+        }
+
+        const { error } = await enqueueTts(msg.guild, voiceChannel, text);
+        if (error) {
+            await msg.react('❌').catch(() => null);
+            return;
+        }
+        await msg.react('🗣️').catch(() => null); // Báo: đã đưa vào hàng đợi đọc
+    } catch (err) {
+        console.error('❌ [TTS] Lỗi xử lý tin nhắn đọc:', err.message);
     }
 });
 
@@ -3849,6 +4102,66 @@ client.on('interactionCreate', async interaction => {
             await feedbackChan.send({ embeds: [infoEmbed] });
 
             return interaction.editReply({ content: `✅ Đã **BẬT** hệ thống góp ý tại ${feedbackChan}!` });
+        }
+
+        // ==========================================
+        // 🔊 LỆNH /setupdoctin — Thiết lập kênh đọc tin nhắn TTS (tách biệt /setup)
+        // ==========================================
+        if (commandName === 'setupdoctin') {
+            await interaction.deferReply({ ephemeral: true });
+            const state = options.getString('trạng_thái');
+
+            if (state === 'off') {
+                if (!gConfig.isTtsSetup) return interaction.editReply({ content: 'ℹ️ Hệ thống đọc tin nhắn chưa được bật.' });
+                gConfig.isTtsSetup = false; saveConfig();
+                // Ngắt kết nối TTS đang chạy (nếu có) ở server này
+                const tq = ttsQueues.get(guild.id);
+                if (tq) { try { tq.connection.destroy(); } catch {} ttsQueues.delete(guild.id); }
+                return interaction.editReply({ content: '🔌 Đã **TẮT** hệ thống đọc tin nhắn.\n(Kênh vẫn còn, dùng `/setupdoctin Bật` để kết nối lại.)' });
+            }
+
+            if (!isTtsReady()) {
+                return interaction.editReply({ content: '❌ Bot chưa được cài đủ thư viện đọc tin nhắn.\nAdmin vui lòng chạy trên máy chủ bot:\n`npm install @discordjs/voice google-tts-api ffmpeg-static libsodium-wrappers`\nsau đó khởi động lại bot.' });
+            }
+
+            // Tạo hoặc dùng lại kênh đọc tin nhắn (ai cũng nhắn được)
+            let ttsChan = gConfig.ttsChannelId ? guild.channels.cache.get(gConfig.ttsChannelId) : null;
+            if (!ttsChan) {
+                ttsChan = await guild.channels.create({
+                    name: '🔊-đọc-tin-nhắn',
+                    type: ChannelType.GuildText,
+                    topic: 'Vào kênh thoại rồi nhắn vào đây, bot sẽ đọc tin nhắn của bạn thành giọng nói.',
+                    permissionOverwrites: [
+                        { id: guild.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+                        { id: client.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks, PermissionFlagsBits.AddReactions] }
+                    ]
+                }).catch(() => null);
+                if (!ttsChan) return interaction.editReply({ content: '❌ Không thể tạo kênh đọc tin nhắn (kiểm tra quyền Bot).' });
+            }
+
+            gConfig.ttsChannelId = ttsChan.id;
+            gConfig.isTtsSetup = true;
+            saveConfig();
+
+            const infoEmbed = new EmbedBuilder()
+                .setColor('#3498DB')
+                .setTitle('🔊 KÊNH ĐỌC TIN NHẮN (TTS)')
+                .setDescription(
+                    'Bot sẽ **đọc to** tin nhắn của bạn trong kênh thoại!\n\n' +
+                    '**Cách dùng:**\n' +
+                    '1️⃣ Vào một kênh thoại bất kỳ\n' +
+                    `2️⃣ Nhắn nội dung cần đọc vào kênh ${ttsChan}\n` +
+                    '3️⃣ Bot tự vào kênh thoại của bạn và đọc lên\n\n' +
+                    '> • Tối đa **500 ký tự** mỗi tin.\n' +
+                    '> • Nếu bot đang **phát nhạc**, tin sẽ được bỏ qua (nhạc ưu tiên).\n' +
+                    '> • Bot tự rời kênh sau 2 phút không có tin mới.'
+                )
+                .setTimestamp();
+
+            await clearBotMessages(ttsChan).catch(() => null);
+            await ttsChan.send({ embeds: [infoEmbed] }).catch(() => null);
+
+            return interaction.editReply({ content: `✅ Đã **BẬT** hệ thống đọc tin nhắn tại ${ttsChan}!` });
         }
 
         // ==========================================
