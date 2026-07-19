@@ -50,7 +50,7 @@ try {
     if (fs.existsSync(configPath)) {
         config = require(configPath);
     } else {
-        config = { token: "", clientId: "", guilds: {} };
+        config = { token: "", clientId: "", guilds: {}, lastUpdateAnnounced: "" };
         fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
     }
 } catch (e) {
@@ -2282,6 +2282,90 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
 });
 
 // -----------------------------------------------------------------
+// 📢 THÔNG BÁO CẬP NHẬT — Components V2 + markdown Discord
+// Đổi UPDATE_VERSION mỗi khi có bản cập nhật mới cần thông báo.
+// Bot chỉ đăng 1 lần cho mỗi version (lưu ở config.lastUpdateAnnounced).
+// -----------------------------------------------------------------
+const UPDATE_CHANNEL_ID = '1527814721053655092';
+const UPDATE_VERSION = '2026.07.19';
+
+async function postUpdateAnnouncement() {
+    if (config.lastUpdateAnnounced === UPDATE_VERSION) return; // Đã đăng bản này rồi
+
+    const channel = await client.channels.fetch(UPDATE_CHANNEL_ID).catch(() => null);
+    if (!channel || !channel.isTextBased?.()) {
+        console.warn(`⚠️ [Update] Không tìm thấy kênh thông báo ${UPDATE_CHANNEL_ID} hoặc không phải kênh text.`);
+        return;
+    }
+
+    const container = new ContainerBuilder()
+        .setAccentColor(0x2ECC71)
+        .addTextDisplayComponents(
+            new TextDisplayBuilder().setContent(
+                `# 🎉 MimiBot Cập Nhật Mới\n` +
+                `-# 📅 Phiên bản \`${UPDATE_VERSION}\``
+            )
+        )
+        .addSeparatorComponents(
+            new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Large).setDivider(true)
+        )
+        .addTextDisplayComponents(
+            new TextDisplayBuilder().setContent(
+                `## 🔊 Tính năng mới: Đọc tin nhắn (TTS)\n` +
+                `> Bot đọc **to** tin nhắn của bạn ngay trong kênh thoại bằng giọng **tiếng Việt**.\n` +
+                `- Admin bật bằng lệnh \`/setupdoctin\` → tạo kênh **🔊-đọc-tin-nhắn**\n` +
+                `- Vào kênh thoại rồi nhắn vào kênh đó, bot tự vào đọc lên\n` +
+                `- Tự cắt câu dài, đọc tối đa **500 ký tự** mỗi tin\n` +
+                `- 🎵 **Nhạc luôn được ưu tiên** — đang phát nhạc thì tin đọc sẽ tạm bỏ qua`
+            )
+        )
+        .addSeparatorComponents(
+            new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
+        )
+        .addTextDisplayComponents(
+            new TextDisplayBuilder().setContent(
+                `## 🛠️ Sửa lỗi & cải tiến\n` +
+                `- ✅ **Nút Giới Hạn** phòng voice đã bấm được trở lại\n` +
+                `- 🎧 **Nhạc mượt hơn** — thêm bộ đệm chống giật/văng ngang\n` +
+                `- 🔢 Giới hạn phòng voice mặc định giờ là **không giới hạn**\n` +
+                `- ✨ Cân bằng lại **XP**: mỗi cấp cần \`5.000 XP\`\n` +
+                `- 🧹 Lệnh reset giờ xóa cả **xu lẫn XP/cấp độ**`
+            )
+        )
+        .addSeparatorComponents(
+            new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
+        )
+        .addTextDisplayComponents(
+            new TextDisplayBuilder().setContent(
+                `## 🎨 Giao diện mới\n` +
+                `Nhiều bảng lệnh đã chuyển sang **giao diện Components V2** hiện đại, gọn gàng hơn — như chính thông báo bạn đang xem.`
+            )
+        )
+        .addSeparatorComponents(
+            new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Large).setDivider(true)
+        )
+        .addTextDisplayComponents(
+            new TextDisplayBuilder().setContent(
+                `-# 💙 Cảm ơn bạn đã sử dụng MimiBot • Mọi góp ý xin gửi về [máy chủ hỗ trợ](${SUPPORT_LINK})`
+            )
+        );
+
+    const sent = await channel.send({
+        components: [container],
+        flags: MessageFlags.IsComponentsV2
+    }).catch(err => {
+        console.error('❌ [Update] Không gửi được thông báo cập nhật:', err.message);
+        return null;
+    });
+
+    if (sent) {
+        config.lastUpdateAnnounced = UPDATE_VERSION;
+        saveConfig();
+        console.log(`📢 [Update] Đã đăng thông báo cập nhật ${UPDATE_VERSION} vào kênh ${UPDATE_CHANNEL_ID}.`);
+    }
+}
+
+// -----------------------------------------------------------------
 // 🚀 ĐỒNG BỘ LỆNH SLASH COMMANDS
 // -----------------------------------------------------------------
 client.once('ready', async () => {
@@ -2630,6 +2714,10 @@ client.once('ready', async () => {
     } catch (error) {
         console.error('❌ Lỗi đồng bộ lệnh:', error);
     }
+
+    // ── 📢 THÔNG BÁO CẬP NHẬT (Components V2 + markdown) ──
+    // Chỉ đăng 1 lần cho mỗi version (tránh spam mỗi lần bot restart).
+    await postUpdateAnnouncement().catch(err => console.error('❌ [Update] Lỗi đăng thông báo cập nhật:', err.message));
 
     // ── Quét & dọn config của các server bot không còn tham gia (bị kick/rời khi bot offline) ──
     let removedGuildCount = 0;
