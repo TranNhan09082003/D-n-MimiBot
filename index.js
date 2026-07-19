@@ -2302,8 +2302,8 @@ async function postUpdateAnnouncement() {
         .setAccentColor(0x2ECC71)
         .addTextDisplayComponents(
             new TextDisplayBuilder().setContent(
-                `# 🎉 MimiBot Cập Nhật Mới\n` +
-                `-# 📅 Phiên bản \`${UPDATE_VERSION}\``
+                `# MimiBot Cập Nhật Mới\n` +
+                `-# Phiên bản \`${UPDATE_VERSION}\``
             )
         )
         .addSeparatorComponents(
@@ -2311,12 +2311,12 @@ async function postUpdateAnnouncement() {
         )
         .addTextDisplayComponents(
             new TextDisplayBuilder().setContent(
-                `## 🔊 Tính năng mới: Đọc tin nhắn (TTS)\n` +
-                `> Bot đọc **to** tin nhắn của bạn ngay trong kênh thoại bằng giọng **tiếng Việt**.\n` +
-                `- Admin bật bằng lệnh \`/setupdoctin\` → tạo kênh **🔊-đọc-tin-nhắn**\n` +
+                `## Tính năng mới: Đọc tin nhắn (TTS)\n` +
+                `> Bot đọc to tin nhắn của bạn ngay trong kênh thoại bằng giọng tiếng Việt.\n` +
+                `- Admin bật bằng lệnh \`/setupdoctin\`, bot sẽ tạo kênh **đọc-tin-nhắn**\n` +
                 `- Vào kênh thoại rồi nhắn vào kênh đó, bot tự vào đọc lên\n` +
                 `- Tự cắt câu dài, đọc tối đa **500 ký tự** mỗi tin\n` +
-                `- 🎵 **Nhạc luôn được ưu tiên** — đang phát nhạc thì tin đọc sẽ tạm bỏ qua`
+                `- Nhạc luôn được ưu tiên: đang phát nhạc thì tin đọc sẽ tạm bỏ qua`
             )
         )
         .addSeparatorComponents(
@@ -2324,12 +2324,12 @@ async function postUpdateAnnouncement() {
         )
         .addTextDisplayComponents(
             new TextDisplayBuilder().setContent(
-                `## 🛠️ Sửa lỗi & cải tiến\n` +
-                `- ✅ **Nút Giới Hạn** phòng voice đã bấm được trở lại\n` +
-                `- 🎧 **Nhạc mượt hơn** — thêm bộ đệm chống giật/văng ngang\n` +
-                `- 🔢 Giới hạn phòng voice mặc định giờ là **không giới hạn**\n` +
-                `- ✨ Cân bằng lại **XP**: mỗi cấp cần \`5.000 XP\`\n` +
-                `- 🧹 Lệnh reset giờ xóa cả **xu lẫn XP/cấp độ**`
+                `## Sửa lỗi và cải tiến\n` +
+                `- Nút **Giới Hạn** phòng voice đã bấm được trở lại\n` +
+                `- Nhạc mượt hơn, thêm bộ đệm chống giật và văng ngang\n` +
+                `- Giới hạn phòng voice mặc định giờ là **không giới hạn**\n` +
+                `- Cân bằng lại XP: mỗi cấp cần \`5.000 XP\`\n` +
+                `- Lệnh reset giờ xóa cả xu lẫn XP và cấp độ`
             )
         )
         .addSeparatorComponents(
@@ -2337,8 +2337,8 @@ async function postUpdateAnnouncement() {
         )
         .addTextDisplayComponents(
             new TextDisplayBuilder().setContent(
-                `## 🎨 Giao diện mới\n` +
-                `Nhiều bảng lệnh đã chuyển sang **giao diện Components V2** hiện đại, gọn gàng hơn — như chính thông báo bạn đang xem.`
+                `## Giao diện mới\n` +
+                `Nhiều bảng lệnh đã chuyển sang giao diện Components V2 hiện đại, gọn gàng hơn, như chính thông báo bạn đang xem.`
             )
         )
         .addSeparatorComponents(
@@ -2346,7 +2346,7 @@ async function postUpdateAnnouncement() {
         )
         .addTextDisplayComponents(
             new TextDisplayBuilder().setContent(
-                `-# 💙 Cảm ơn bạn đã sử dụng MimiBot • Mọi góp ý xin gửi về [máy chủ hỗ trợ](${SUPPORT_LINK})`
+                `-# Cảm ơn bạn đã sử dụng MimiBot. Mọi góp ý xin gửi về [máy chủ hỗ trợ](${SUPPORT_LINK})`
             )
         );
 
