@@ -2412,6 +2412,14 @@ function buildMusicRows(mq) {
             new ButtonBuilder().setCustomId('music_247').setLabel(mq.stay247 ? '🔁 24/7: Bật' : '🔁 24/7: Tắt').setStyle(mq.stay247 ? ButtonStyle.Success : ButtonStyle.Secondary),
             new ButtonBuilder().setCustomId('music_effect').setLabel(mq.effect && mq.effect !== 'none' ? `🎚️ ${AUDIO_EFFECTS[mq.effect]?.label || 'Hiệu ứng'}` : '🎚️ Hiệu ứng').setStyle(mq.effect && mq.effect !== 'none' ? ButtonStyle.Success : ButtonStyle.Secondary),
             new ButtonBuilder().setCustomId('music_lyrics').setLabel('🎤 Lời bài hát').setStyle(ButtonStyle.Secondary)
+        ),
+        // Hàng 4: tua nhanh + xáo trộn + phát lại từ đầu + xóa sạch hàng đợi
+        new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('music_seekback').setLabel('⏪ -10s').setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId('music_seekfwd').setLabel('⏩ +10s').setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId('music_restart').setLabel('↺ Phát lại').setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId('music_shuffle').setLabel('🔀 Xáo trộn').setStyle(ButtonStyle.Secondary).setDisabled(mq.queue.length < 2),
+            new ButtonBuilder().setCustomId('music_clearqueue').setLabel('🗑 Xóa hàng đợi').setStyle(ButtonStyle.Danger).setDisabled(mq.queue.length === 0)
         )
     ];
 }
@@ -8317,6 +8325,59 @@ client.on('interactionCreate', async interaction => {
                     ],
                     flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral
                 });
+            }
+
+            // ⏪⏩ TUA NHANH ±10s — phát lại bài hiện tại từ vị trí mới (giữ hiệu ứng đang áp).
+            if (customId === 'music_seekback' || customId === 'music_seekfwd') {
+                const cur = getPlaybackSec(mq);
+                const total = mq.current.duration || 0;
+                let target = customId === 'music_seekfwd' ? cur + 10 : cur - 10;
+                target = Math.max(0, target);
+                // Tua tới >= độ dài -> bỏ qua bài luôn cho tự nhiên
+                if (total > 0 && target >= total) {
+                    await interaction.deferUpdate().catch(() => null);
+                    killCurrentProcess(mq);
+                    mq.player.stop();
+                    return;
+                }
+                await interaction.deferUpdate().catch(() => null);
+                await playNextTrack(guild.id, { replayCurrent: true, seekSec: target, effectKey: mq.effect || 'none' });
+                if (mq.nowPlayingMessage) mq.nowPlayingMessage.edit(buildMusicPayload(mq)).catch(() => null);
+                return;
+            }
+
+            // ↺ PHÁT LẠI TỪ ĐẦU bài hiện tại
+            if (customId === 'music_restart') {
+                await interaction.deferUpdate().catch(() => null);
+                await playNextTrack(guild.id, { replayCurrent: true, seekSec: 0, effectKey: mq.effect || 'none' });
+                if (mq.nowPlayingMessage) mq.nowPlayingMessage.edit(buildMusicPayload(mq)).catch(() => null);
+                return;
+            }
+
+            // 🔀 XÁO TRỘN hàng đợi (Fisher-Yates), không đụng bài đang phát
+            if (customId === 'music_shuffle') {
+                if (mq.queue.length < 2) {
+                    return interaction.reply(buildMusicNoticeEphemeral('Không đủ bài để xáo', 'Cần ít nhất **2 bài** trong hàng đợi để xáo trộn.', 0xF1C40F));
+                }
+                for (let i = mq.queue.length - 1; i > 0; i--) {
+                    const j = Math.floor(Math.random() * (i + 1));
+                    [mq.queue[i], mq.queue[j]] = [mq.queue[j], mq.queue[i]];
+                }
+                persistSession(guild.id);
+                await interaction.update(buildMusicPayload(mq)).catch(() => null);
+                return interaction.followUp(buildMusicNoticeEphemeral('Đã xáo trộn hàng đợi', `**${mq.queue.length} bài** trong hàng đợi đã được xáo trộn ngẫu nhiên.`, 0x57F287)).catch(() => null);
+            }
+
+            // 🗑 XÓA SẠCH hàng đợi (giữ bài đang phát)
+            if (customId === 'music_clearqueue') {
+                const removed = mq.queue.length;
+                if (removed === 0) {
+                    return interaction.reply(buildMusicNoticeEphemeral('Hàng đợi đã trống', 'Không có bài nào trong hàng đợi để xóa.', 0x99AAB5));
+                }
+                mq.queue = [];
+                persistSession(guild.id);
+                await interaction.update(buildMusicPayload(mq)).catch(() => null);
+                return interaction.followUp(buildMusicNoticeEphemeral('Đã xóa hàng đợi', `Đã xóa **${removed} bài** khỏi hàng đợi. Bài đang phát vẫn tiếp tục.`, 0x99AAB5)).catch(() => null);
             }
         }
 
