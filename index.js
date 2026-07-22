@@ -2491,6 +2491,27 @@ function killCurrentProcess(mq) {
 // -----------------------------------------------------------------
 // 💾 SESSION-RESTORE — lưu/khôi phục phiên phát khi bot khởi động lại
 // -----------------------------------------------------------------
+// 🎧 Kiểm tra quyền điều khiển nhạc của 1 thành viên với 1 server.
+// Quy tắc:
+//   • Nếu server CÓ đặt DJ role: chỉ DJ + người có quyền ManageGuild/Administrator + owner panel được điều khiển.
+//   • Nếu server KHÔNG đặt DJ role: giữ logic cũ — chỉ owner panel (người mở) điều khiển.
+// Trả về true nếu được phép. mq có thể null (chưa phát) -> chỉ xét DJ/admin.
+function canControlMusic(guildId, member, mq) {
+    if (!member) return false;
+    // Admin / quản lý server luôn có quyền
+    if (member.permissions?.has(PermissionFlagsBits.ManageGuild) || member.permissions?.has(PermissionFlagsBits.Administrator)) return true;
+    const cfg = musicStore.getGuildConfig(guildId);
+    if (cfg.djRoleId) {
+        // Có DJ role: cần mang role đó (hoặc là owner panel)
+        if (member.roles?.cache?.has(cfg.djRoleId)) return true;
+        if (mq && mq.ownerId && member.id === mq.ownerId) return true;
+        return false;
+    }
+    // Không có DJ role: chỉ owner panel (giữ nguyên hành vi cũ)
+    if (mq && mq.ownerId) return member.id === mq.ownerId;
+    return true;
+}
+
 // Tính vị trí đang phát (giây) của server: giây đã tua + thời gian resource đã phát.
 function getPlaybackSec(mq) {
     if (!mq) return 0;
@@ -2861,12 +2882,16 @@ async function getOrCreateMusicQueue(guild, voiceChannel, textChannel) {
     const player = voiceLib.createAudioPlayer({ behaviors: { noSubscriber: voiceLib.NoSubscriberBehavior.Pause } });
     connection.subscribe(player);
 
+    // Âm lượng mặc định lấy từ cấu hình server (nếu admin đã đặt qua /dj amluong), mặc định 100%.
+    const djCfg = musicStore.getGuildConfig(guild.id);
+    const startVolume = typeof djCfg.defaultVolume === 'number' ? djCfg.defaultVolume : 1;
+
     mq = {
         connection, player,
         voiceChannelId: voiceChannel.id,
         textChannel,
         queue: [], current: null, currentResource: null, currentProcess: null, currentBuffer: null,
-        volume: 1, loop: 'off', // 1 = 100% truyền thẳng Opus, nhẹ CPU (xem playNextTrack)
+        volume: startVolume, loop: 'off', // âm lượng mặc định theo cấu hình server (xem playNextTrack)
         pendingReplay: false,   // cờ báo lần playNextTrack tới là "phát lại để đổi âm lượng", không phải chuyển bài
         nowPlayingMessage: null, idleTimeout: null,
         ownerId: null,          // ID người mở panel nhạc — chỉ người này được thao tác các nút
@@ -3657,6 +3682,16 @@ client.once('ready', async () => {
                 .addStringOption(o => o.setName('tên').setDescription('Tên album cần phát').setRequired(true)))
             .addSubcommand(s => s.setName('xoa').setDescription('Xóa một album của bạn')
                 .addStringOption(o => o.setName('tên').setDescription('Tên album cần xóa').setRequired(true))),
+
+        new SlashCommandBuilder()
+            .setName('dj')
+            .setDescription('Cấu hình nhạc cho server: DJ role, âm lượng mặc định')
+            .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+            .addSubcommand(s => s.setName('xem').setDescription('Xem cấu hình nhạc hiện tại của server'))
+            .addSubcommand(s => s.setName('role').setDescription('Đặt vai trò DJ (chỉ DJ + admin mới điều khiển nhạc)')
+                .addRoleOption(o => o.setName('vai_trò').setDescription('Vai trò DJ. Bỏ trống để gỡ DJ role.').setRequired(false)))
+            .addSubcommand(s => s.setName('amluong').setDescription('Đặt âm lượng mặc định khi bắt đầu phát (0-150%)')
+                .addIntegerOption(o => o.setName('phần_trăm').setDescription('Từ 0 đến 150').setRequired(true).setMinValue(0).setMaxValue(150))),
 
         new SlashCommandBuilder()
             .setName('help')
@@ -4967,6 +5002,42 @@ client.on('messageCreate', async (message) => {
     }
 
     // 8. Lệnh phát nhạc bằng prefix: miplay hoặc mipl [tên bài hát / link YouTube]
+    if (command === 'midj') {
+        // Chỉ admin / quản lý server được cấu hình
+        if (!message.member.permissions.has(PermissionFlagsBits.ManageGuild) && !message.member.permissions.has(PermissionFlagsBits.Administrator)) {
+            return message.reply({ content: '❌ Bạn cần quyền **Quản lý máy chủ** để cấu hình nhạc.', allowedMentions: { repliedUser: false } });
+        }
+        const rest = message.content.slice(args[0].length).trim();
+        const spaceIdx = rest.indexOf(' ');
+        const sub = (spaceIdx === -1 ? rest : rest.slice(0, spaceIdx)).toLowerCase();
+        const val = (spaceIdx === -1 ? '' : rest.slice(spaceIdx + 1)).trim();
+        const cfg = musicStore.getGuildConfig(message.guild.id);
+        const noticeV2 = (title, body, accent) => message.reply({ components: [buildMusicNoticeContainer(title, body, accent)], flags: MessageFlags.IsComponentsV2, allowedMentions: { repliedUser: false } }).catch(() => null);
+
+        if (!sub || sub === 'xem') {
+            const djText = cfg.djRoleId ? `<@&${cfg.djRoleId}>` : '*chưa đặt*';
+            return noticeV2('Cấu hình nhạc của server', `**DJ role:** ${djText}\n**Âm lượng mặc định:** \`${Math.round((cfg.defaultVolume ?? 1) * 100)}%\`\n\n-# \`midj role @role\` · \`midj role off\` · \`midj amluong 80\``, 0x5865F2);
+        }
+        if (sub === 'role') {
+            if (!val || val.toLowerCase() === 'off' || val.toLowerCase() === 'tat') {
+                musicStore.setGuildConfig(message.guild.id, { djRoleId: null });
+                return noticeV2('Đã gỡ DJ role', 'Quyền điều khiển trở về **chỉ người mở panel**.', 0x99AAB5);
+            }
+            const roleId = val.match(/\d{5,}/)?.[0];
+            const role = roleId ? message.guild.roles.cache.get(roleId) : null;
+            if (!role) return noticeV2('Không tìm thấy vai trò', 'Hãy tag vai trò: `midj role @DJ` hoặc `midj role off` để gỡ.', 0xF1C40F);
+            musicStore.setGuildConfig(message.guild.id, { djRoleId: role.id });
+            return noticeV2('Đã đặt DJ role', `Từ giờ chỉ <@&${role.id}>, quản trị viên và người mở panel mới điều khiển được nhạc.`, 0x57F287);
+        }
+        if (sub === 'amluong' || sub === 'volume' || sub === 'vol') {
+            const pct = parseInt(val, 10);
+            if (isNaN(pct) || pct < 0 || pct > 150) return noticeV2('Giá trị không hợp lệ', 'Nhập số từ 0 đến 150. Ví dụ: `midj amluong 80`.', 0xF1C40F);
+            musicStore.setGuildConfig(message.guild.id, { defaultVolume: Math.max(0, Math.min(1.5, pct / 100)) });
+            return noticeV2('Đã đặt âm lượng mặc định', `Các bài phát mới sẽ bắt đầu ở **${pct}%**.`, 0x57F287);
+        }
+        return noticeV2('Lệnh DJ không hợp lệ', 'Các lệnh: `xem`, `role @role` / `role off`, `amluong <0-150>`.', 0xF1C40F);
+    }
+
     if (command === 'mialbum' || command === 'mial') {
         const rest = message.content.slice(args[0].length).trim();
         const spaceIdx = rest.indexOf(' ');
@@ -7246,6 +7317,40 @@ client.on('interactionCreate', async interaction => {
             }
         }
 
+        if (commandName === 'dj') {
+            const sub = options.getSubcommand();
+            const cfg = musicStore.getGuildConfig(guild.id);
+
+            if (sub === 'xem') {
+                const djText = cfg.djRoleId ? `<@&${cfg.djRoleId}>` : '*chưa đặt* (chỉ người mở panel điều khiển)';
+                const volText = `${Math.round((cfg.defaultVolume ?? 1) * 100)}%`;
+                return interaction.reply(buildMusicNoticeEphemeral(
+                    'Cấu hình nhạc của server',
+                    `**DJ role:** ${djText}\n**Âm lượng mặc định:** \`${volText}\`\n\n-# Đổi bằng \`/dj role\` và \`/dj amluong\`.`,
+                    0x5865F2
+                ));
+            }
+
+            if (sub === 'role') {
+                const role = options.getRole('vai_trò');
+                musicStore.setGuildConfig(guild.id, { djRoleId: role ? role.id : null });
+                return interaction.reply(buildMusicNoticeEphemeral(
+                    role ? 'Đã đặt DJ role' : 'Đã gỡ DJ role',
+                    role
+                        ? `Từ giờ chỉ <@&${role.id}>, quản trị viên và người mở panel mới điều khiển được nhạc.`
+                        : 'Đã gỡ DJ role. Quyền điều khiển trở về **chỉ người mở panel**.',
+                    0x57F287
+                ));
+            }
+
+            if (sub === 'amluong') {
+                const pct = options.getInteger('phần_trăm');
+                const vol = Math.max(0, Math.min(1.5, pct / 100));
+                musicStore.setGuildConfig(guild.id, { defaultVolume: vol });
+                return interaction.reply(buildMusicNoticeEphemeral('Đã đặt âm lượng mặc định', `Các bài phát mới sẽ bắt đầu ở **${pct}%**.`, 0x57F287));
+            }
+        }
+
         if (commandName === 'queue') {
             const mq = musicQueues.get(guild.id);
             if (!mq || (!mq.current && mq.queue.length === 0)) {
@@ -7604,15 +7709,14 @@ client.on('interactionCreate', async interaction => {
                 ));
             }
 
-            // 🔒 PANEL OWNERSHIP: chỉ người MỞ panel (người dùng lệnh /play - miplay đầu tiên) mới được
-            // thao tác. Người khác bấm -> hiện thông báo từ chối (Components V2 + markdown), ẩn (ephemeral).
-            if (mq.ownerId && user.id !== mq.ownerId) {
-                return interaction.reply(buildOwnershipRejectPayload(
-                    'Panel này không phải của bạn',
-                    `Bảng điều khiển nhạc này do <@${mq.ownerId}> mở.\n` +
-                    `> Chỉ **người mở panel** mới được bấm các nút điều khiển.\n\n` +
-                    `-# Bạn có thể tự mở panel riêng bằng lệnh \`/play\` hoặc \`miplay\`.`
-                ));
+            // 🔒 QUYỀN ĐIỀU KHIỂN: nếu server đặt DJ role -> DJ + admin + owner panel đều điều khiển được;
+            // nếu KHÔNG đặt DJ role -> chỉ người MỞ panel (giữ hành vi cũ). Xem canControlMusic.
+            if (!canControlMusic(guild.id, member, mq)) {
+                const cfg = musicStore.getGuildConfig(guild.id);
+                const reason = cfg.djRoleId
+                    ? `Server này đã đặt **DJ role** (<@&${cfg.djRoleId}>).\n> Chỉ **DJ**, quản trị viên, hoặc <@${mq.ownerId}> mới điều khiển được.`
+                    : `Bảng điều khiển nhạc này do <@${mq.ownerId}> mở.\n> Chỉ **người mở panel** mới được bấm các nút điều khiển.`;
+                return interaction.reply(buildOwnershipRejectPayload('Bạn không có quyền điều khiển', reason + `\n\n-# Bạn có thể tự mở panel riêng bằng lệnh \`/play\` hoặc \`miplay\`.`));
             }
 
             if (customId === 'music_pauseresume') {
