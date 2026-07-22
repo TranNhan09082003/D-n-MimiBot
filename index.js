@@ -2038,6 +2038,108 @@ async function searchYoutube(query) {
     return null; // Không còn kết quả nào phát được (toàn bộ đều bị chặn hoặc không tìm thấy)
 }
 
+// =====================================================================
+// 🌐 MỞ RỘNG NGUỒN NHẠC — ngoài YouTube: SoundCloud, Bandcamp, Twitch, Vimeo,
+// link audio trực tiếp (.mp3/.m4a...) và Spotify (qua oEmbed công khai -> tìm YouTube).
+// yt-dlp hỗ trợ sẵn hàng nghìn site nên hầu hết link chỉ cần đưa thẳng cho yt-dlp.
+// =====================================================================
+
+const GENERIC_URL_REGEX = /^https?:\/\/\S+$/i;
+const SPOTIFY_URL_REGEX = /^https?:\/\/(open\.)?spotify\.com\//i;
+// Các host yt-dlp phát trực tiếp được (không phải YouTube, không phải Spotify).
+const DIRECT_YTDLP_HOST_REGEX = /(soundcloud\.com|bandcamp\.com|twitch\.tv|clips\.twitch\.tv|vimeo\.com|dailymotion\.com|mixcloud\.com|audius\.co)/i;
+// Đuôi file audio/video phát trực tiếp qua link tĩnh.
+const DIRECT_MEDIA_EXT_REGEX = /\.(mp3|m4a|aac|ogg|opus|wav|flac|webm|mp4|mov)(\?.*)?$/i;
+
+// GET 1 URL và parse JSON (dùng cho Spotify oEmbed). Trả null nếu lỗi. KHÔNG gửi token/dữ liệu nhạy cảm.
+function httpGetJson(fullUrl) {
+    return new Promise((resolve) => {
+        let u;
+        try { u = new URL(fullUrl); } catch { return resolve(null); }
+        if (u.protocol !== 'https:') return resolve(null); // chỉ HTTPS
+        const req = https.request({
+            hostname: u.hostname,
+            path: u.pathname + u.search,
+            method: 'GET',
+            headers: { 'User-Agent': 'MimiBot/1.0', 'Accept': 'application/json' }
+        }, (res) => {
+            if (res.statusCode !== 200) { res.resume(); return resolve(null); }
+            let data = '';
+            res.on('data', (c) => { data += c; });
+            res.on('end', () => { try { resolve(JSON.parse(data)); } catch { resolve(null); } });
+        });
+        req.on('error', () => resolve(null));
+        req.setTimeout(8000, () => { try { req.destroy(); } catch {} resolve(null); });
+        req.end();
+    });
+}
+
+// Lấy tên bài từ link Spotify qua oEmbed CÔNG KHAI (không cần API key). Trả chuỗi tìm kiếm hoặc null.
+async function resolveSpotifyQuery(spotifyUrl) {
+    const clean = spotifyUrl.split('?')[0]; // bỏ tham số theo dõi
+    const data = await httpGetJson(`https://open.spotify.com/oembed?url=${encodeURIComponent(clean)}`);
+    // oEmbed trả { title } — với track thường là "Tên bài", đủ để tìm trên YouTube.
+    if (data && data.title) return String(data.title).trim();
+    return null;
+}
+
+// Phát 1 URL nguồn khác YouTube trực tiếp qua yt-dlp (SoundCloud/Bandcamp/Twitch/Vimeo/link tĩnh...).
+async function resolveDirectUrl(url) {
+    const info = await ytDlpExec(url, {
+        dumpSingleJson: true,
+        noPlaylist: true,      // link set/album -> chỉ lấy bài đầu để tránh nhồi hàng đợi ngoài ý muốn
+        skipDownload: true,
+        noWarnings: true,
+        noCheckCertificates: true
+    });
+    if (!info) return null;
+    // Một số nguồn trả entries (playlist) -> lấy entry đầu
+    const item = info.entries && info.entries.length ? info.entries[0] : info;
+    if (!item || (!item.url && !item.webpage_url && !item.id)) return null;
+    return {
+        title: item.title || 'Không rõ tiêu đề',
+        url: item.webpage_url || item.original_url || url,
+        duration: Number(item.duration) || 0,
+        thumbnail: item.thumbnail || (Array.isArray(item.thumbnails) ? item.thumbnails[item.thumbnails.length - 1]?.url : null) || null
+    };
+}
+
+// 🎯 Bộ giải mã nguồn TỔNG QUÁT: nhận query (từ khóa hoặc URL bất kỳ) -> trả 1 track phát được.
+// Ưu tiên: YouTube (logic cũ, chống 403) -> Spotify (oEmbed -> tìm YouTube) -> nguồn yt-dlp khác -> tìm YouTube.
+async function resolveTrack(query) {
+    const q = String(query || '').trim();
+    if (!q) return null;
+
+    // 1) Link YouTube -> dùng đường tối ưu sẵn có (chống 403, lọc video bị chặn)
+    if (YT_URL_REGEX.test(q)) return searchYoutube(q);
+
+    // 2) Link Spotify -> lấy tên bài (oEmbed công khai) rồi tìm trên YouTube để phát
+    if (SPOTIFY_URL_REGEX.test(q)) {
+        const term = await resolveSpotifyQuery(q);
+        if (!term) {
+            const err = new Error('Không đọc được thông tin bài hát từ link Spotify này.');
+            err.code = 'SPOTIFY_RESOLVE_FAILED';
+            throw err;
+        }
+        const track = await searchYoutube(term);
+        if (track) track.sourceNote = `Spotify → YouTube: ${term}`;
+        return track;
+    }
+
+    // 3) URL nguồn khác yt-dlp hỗ trợ (SoundCloud/Bandcamp/Twitch/Vimeo...) hoặc link media trực tiếp
+    if (GENERIC_URL_REGEX.test(q) && (DIRECT_YTDLP_HOST_REGEX.test(q) || DIRECT_MEDIA_EXT_REGEX.test(q))) {
+        return resolveDirectUrl(q);
+    }
+
+    // 4) URL lạ khác -> vẫn thử đưa cho yt-dlp (nó hỗ trợ rất nhiều site); lỗi thì coi như không có
+    if (GENERIC_URL_REGEX.test(q)) {
+        try { return await resolveDirectUrl(q); } catch { return null; }
+    }
+
+    // 5) Không phải URL -> tìm kiếm bằng từ khóa trên YouTube
+    return searchYoutube(q);
+}
+
 // Trích ID video (11 ký tự) từ 1 URL YouTube; null nếu không phải link YouTube nhận dạng được.
 function extractYoutubeId(rawUrl) {
     const input = String(rawUrl || '').trim();
@@ -5453,11 +5555,13 @@ client.on('messageCreate', async (message) => {
 
         let track;
         try {
-            track = await searchYoutube(query);
+            track = await resolveTrack(query); // hỗ trợ YouTube, Spotify, SoundCloud, Bandcamp, Twitch, Vimeo, link...
         } catch (err) {
             console.error('❌ [Music] Lỗi tìm kiếm (prefix):', err.message);
             const payload = err.code === 'RESTRICTED_VIDEO'
                 ? buildMusicNoticePayload('Video bị giới hạn', 'Video này đang **riêng tư** hoặc **bị giới hạn độ tuổi**, bot không thể phát. Vui lòng thử link/từ khóa khác.', 0xF1C40F)
+                : err.code === 'SPOTIFY_RESOLVE_FAILED'
+                ? buildMusicNoticePayload('Không đọc được link Spotify', 'Không lấy được thông tin bài hát từ link Spotify này. Hãy thử dán tên bài hoặc link YouTube.', 0xF1C40F)
                 : buildMusicNoticePayload('Không tìm được bài hát', 'Link có thể **bị lỗi, riêng tư hoặc bị chặn độ tuổi**. Hãy thử link hoặc từ khóa khác.', 0xE74C3C);
             if (statusMsg) statusMsg.edit(payload).catch(() => null);
             return;
@@ -7502,11 +7606,13 @@ client.on('interactionCreate', async interaction => {
             const query = options.getString('từ_khóa');
             let track;
             try {
-                track = await searchYoutube(query);
+                track = await resolveTrack(query); // YouTube, Spotify, SoundCloud, Bandcamp, Twitch, Vimeo, link...
             } catch (err) {
                 console.error('❌ [Music] Lỗi tìm kiếm:', err.message);
                 const msg = err.code === 'RESTRICTED_VIDEO'
                     ? '🔞 Video này đang **riêng tư** hoặc **bị giới hạn độ tuổi**, bot không thể phát. Vui lòng thử link/từ khóa khác.'
+                    : err.code === 'SPOTIFY_RESOLVE_FAILED'
+                    ? '❌ Không lấy được thông tin bài hát từ link Spotify này. Hãy thử dán tên bài hoặc link YouTube.'
                     : '❌ Không thể tìm bài hát này (link có thể bị lỗi, riêng tư hoặc bị chặn độ tuổi).';
                 return interaction.editReply({ content: msg });
             }
