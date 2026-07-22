@@ -2586,6 +2586,10 @@ function buildMusicRows(mq) {
 // thanh tiến trình dạng con trượt, khối thông số dạng trích dẫn và 4 hàng nút có emoji.
 function buildMusicContainer(mq) {
     const track = mq.current;
+    // Phòng thủ: nếu không còn bài đang phát thì trả về panel thông báo thay vì sập (track.duration trên null).
+    if (!track) {
+        return buildMusicNoticeContainer('Không có bài đang phát', 'Bài đã kết thúc hoặc bot đã rời kênh.', 0x99AAB5);
+    }
     // Cộng seekBase: playbackDuration chỉ đếm thời gian resource HIỆN TẠI đã phát; khi tua (seek/khôi phục)
     // phải cộng số giây đã bỏ qua ở đầu để thanh tiến trình hiển thị đúng vị trí thật.
     const played = mq.currentResource ? Math.floor(mq.currentResource.playbackDuration / 1000) : 0;
@@ -8128,8 +8132,13 @@ client.on('interactionCreate', async interaction => {
         await interaction.update(buildEffectsPayload(key)).catch(() => null);
         // Phát lại bài hiện tại từ resumeSec với hiệu ứng mới (đi qua ffmpeg).
         await playNextTrack(guild.id, { replayCurrent: true, seekSec: resumeSec, effectKey: key });
-        // Cập nhật panel "Đang phát" để nhãn nút hiệu ứng đổi màu
-        if (mq.nowPlayingMessage) mq.nowPlayingMessage.edit(buildMusicPayload(mq)).catch(() => null);
+        // Cập nhật panel "Đang phát" để nhãn nút hiệu ứng đổi màu.
+        // Lấy lại mq (có thể đã thay đổi trong lúc await) và chỉ vẽ khi vẫn còn bài đang phát,
+        // tránh TypeError khi mq.current == null (bài kết thúc / bot rời kênh giữa chừng).
+        const mqNow = musicQueues.get(guild.id);
+        if (mqNow && mqNow.current && mqNow.nowPlayingMessage) {
+            mqNow.nowPlayingMessage.edit(buildMusicPayload(mqNow)).catch(() => null);
+        }
         return;
     }
 
