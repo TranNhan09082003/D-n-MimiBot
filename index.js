@@ -2134,11 +2134,12 @@ function buildMusicRows(mq) {
             new ButtonBuilder().setCustomId('music_stop').setLabel('Dừng & Thoát').setStyle(ButtonStyle.Danger),
             new ButtonBuilder().setCustomId('music_loop').setLabel(loopLabel).setStyle(loopStyle)
         ),
-        // Hàng 2: âm lượng + hàng đợi
+        // Hàng 2: âm lượng + hàng đợi + tim yêu thích (tim là CÁ NHÂN mỗi người, ai cùng kênh cũng bấm được)
         new ActionRowBuilder().addComponents(
             new ButtonBuilder().setCustomId('music_voldown').setLabel('Giảm âm').setStyle(ButtonStyle.Secondary).setDisabled(mq.volume <= 0),
             new ButtonBuilder().setCustomId('music_volup').setLabel('Tăng âm').setStyle(ButtonStyle.Secondary).setDisabled(mq.volume >= 1.5),
-            new ButtonBuilder().setCustomId('music_queue').setLabel('Hàng đợi').setStyle(ButtonStyle.Secondary)
+            new ButtonBuilder().setCustomId('music_queue').setLabel('Hàng đợi').setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId('music_fav').setLabel('❤ Yêu thích').setStyle(ButtonStyle.Success)
         )
     ];
 }
@@ -2355,6 +2356,42 @@ function buildQueueRemoveRow(mq) {
     return [new ActionRowBuilder().addComponents(selectMenu)];
 }
 
+// ❤️ Payload danh sách bài YÊU THÍCH của 1 user (ephemeral). Kèm select menu để chọn 1 bài phát ngay.
+// favorites = mảng track { title, url, duration, thumbnail }. Trả về payload đầy đủ cho reply/editReply.
+function buildFavoritesPayload(favorites) {
+    if (!favorites || favorites.length === 0) {
+        return {
+            components: [buildMusicNoticeContainer(
+                'Album Yêu thích trống',
+                'Bạn chưa lưu bài nào. Bấm nút **❤ Yêu thích** ở panel nhạc để thêm bài đang phát vào album của bạn.',
+                0x99AAB5
+            )],
+            flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral
+        };
+    }
+    const lines = favorites.slice(0, 15).map((t, i) => `${i + 1}. **${t.title}** \`${formatDuration(t.duration)}\``);
+    let body = lines.join('\n');
+    if (favorites.length > 15) body += `\n-# ...và ${favorites.length - 15} bài khác`;
+    const container = buildMusicNoticeContainer(
+        `Album Yêu thích (${favorites.length} bài)`,
+        body + '\n\n-# Chọn 1 bài bên dưới để phát ngay (bạn phải đang ở trong kênh thoại).',
+        0xED4245
+    );
+    const options = favorites.slice(0, 25).map((t, i) =>
+        new StringSelectMenuOptionBuilder()
+            .setLabel(`${i + 1}. ${t.title}`.slice(0, 100))
+            .setDescription(formatDuration(t.duration))
+            .setValue(String(i))
+    );
+    const row = new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+            .setCustomId('music_fav_play_select')
+            .setPlaceholder('▶ Chọn 1 bài yêu thích để phát...')
+            .addOptions(options)
+    );
+    return { components: [container, row], flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral };
+}
+
 // 🔴 THANH TIẾN TRÌNH LIVE: cập nhật tin "Đang phát" định kỳ để phút:giây và thanh tiến trình
 // nhảy theo thời gian thực. CHÚ Ý rate limit của Discord: chỉnh sửa 1 tin nhắn quá dày sẽ bị
 // giới hạn -> đặt nhịp 7 giây (đủ mượt mà an toàn). Tự dừng khi bài kết thúc / skip / stop.
@@ -2486,6 +2523,32 @@ async function restoreMusicSessions() {
 
 // Phát bài tiếp theo trong hàng đợi (tự động gọi khi player Idle hoặc khi bắt đầu /play)
 // opts:
+// Đưa 1 track ĐÃ CÓ SẴN (favorites/album — không cần tìm kiếm) vào hàng đợi của server.
+// Tự tạo kết nối nếu bot chưa ở kênh. Trả về { ok, error, queued } — queued=true nếu chỉ thêm
+// vào hàng đợi (đang có bài phát), false nếu bắt đầu phát ngay.
+async function enqueueKnownTrack(guild, voiceChannel, textChannel, track, requesterId) {
+    if (!isMusicReady()) return { ok: false, error: '❌ Bot chưa được cài đủ thư viện nghe nhạc.' };
+    const norm = MusicStore.normalizeTrack(track);
+    if (!norm) return { ok: false, error: '❌ Bài hát không hợp lệ (thiếu link).' };
+    const botPerms = voiceChannel.permissionsFor(guild.members.me);
+    if (!botPerms?.has(PermissionFlagsBits.Connect) || !botPerms?.has(PermissionFlagsBits.Speak)) {
+        return { ok: false, error: '❌ Bot không có quyền **Kết nối** hoặc **Nói** trong kênh thoại này.' };
+    }
+    const { mq, error } = await getOrCreateMusicQueue(guild, voiceChannel, textChannel);
+    if (error) return { ok: false, error };
+    if (!mq.ownerId) mq.ownerId = requesterId;
+    const playable = { ...norm, requestedBy: 'Album cá nhân' };
+    mq.queue.push(playable);
+    if (mq.current) {
+        persistSession(guild.id);
+        return { ok: true, queued: true, position: mq.queue.length, title: norm.title };
+    }
+    const statusMsg = await textChannel.send(buildMusicNoticePayload('Đang tải bài hát', `**${norm.title}**...`)).catch(() => null);
+    if (statusMsg) mq.nowPlayingMessage = statusMsg;
+    await playNextTrack(guild.id);
+    return { ok: true, queued: false, title: norm.title };
+}
+
 // Tua bài đang phát tới giây targetSec (dùng chung cho slash /sek và prefix misek).
 // Trả về { ok, error } — error là chuỗi tiếng Việt để hiển thị cho người dùng.
 async function sekCurrentTrack(guildId, targetSec) {
@@ -3501,6 +3564,10 @@ client.once('ready', async () => {
             .setName('sek')
             .setDescription('Tua bài đang phát tới mốc thời gian bất kỳ (vd: 90 hoặc 1:30 hoặc 1m30s)')
             .addStringOption(o => o.setName('thời_điểm').setDescription('Giây (90) hoặc phút:giây (1:30) hoặc 1m30s').setRequired(true)),
+
+        new SlashCommandBuilder()
+            .setName('yeuthich')
+            .setDescription('Xem danh sách bài hát yêu thích của bạn và phát lại'),
 
         new SlashCommandBuilder()
             .setName('help')
@@ -4811,6 +4878,17 @@ client.on('messageCreate', async (message) => {
     }
 
     // 8. Lệnh phát nhạc bằng prefix: miplay hoặc mipl [tên bài hát / link YouTube]
+    if (command === 'miyt' || command === 'miyeuthich' || command === 'mifav') {
+        const favorites = musicStore.getFavorites(message.author.id);
+        const payload = buildFavoritesPayload(favorites);
+        // Cờ Ephemeral chỉ hợp lệ cho interaction; tin nhắn prefix phải bỏ đi (chỉ giữ IsComponentsV2).
+        return message.reply({
+            components: payload.components,
+            flags: MessageFlags.IsComponentsV2,
+            allowedMentions: { repliedUser: false }
+        }).catch(() => null);
+    }
+
     if (command === 'misek' || command === 'miseek' || command === 'mitua') {
         const mq = musicQueues.get(message.guild.id);
         if (!mq || !mq.current) {
@@ -6958,6 +7036,11 @@ client.on('interactionCreate', async interaction => {
             return interaction.editReply({ content: `⏩ Đã tua tới **${formatDuration(targetSec)}**.` });
         }
 
+        if (commandName === 'yeuthich') {
+            const favorites = musicStore.getFavorites(user.id);
+            return interaction.reply(buildFavoritesPayload(favorites));
+        }
+
         if (commandName === 'queue') {
             const mq = musicQueues.get(guild.id);
             if (!mq || (!mq.current && mq.queue.length === 0)) {
@@ -6976,6 +7059,29 @@ client.on('interactionCreate', async interaction => {
     // ==========================================
     // KHỐI 2: XỬ LÝ SỰ KIỆN KHI BẤM NÚT (BUTTON)
     // ==========================================
+    // ==========================================
+    // ❤️ HANDLER SELECT MENU: PHÁT 1 BÀI TỪ ALBUM YÊU THÍCH
+    // ==========================================
+    if (interaction.isStringSelectMenu() && interaction.customId === 'music_fav_play_select') {
+        const voiceChannel = member.voice?.channel;
+        if (!voiceChannel) {
+            return interaction.reply(buildMusicNoticeEphemeral('Bạn chưa vào kênh thoại', 'Hãy vào một kênh thoại trước khi phát bài yêu thích.'));
+        }
+        const favorites = musicStore.getFavorites(user.id);
+        const idx = parseInt(interaction.values[0], 10);
+        if (isNaN(idx) || idx < 0 || idx >= favorites.length) {
+            return interaction.reply(buildMusicNoticeEphemeral('Bài không còn trong album', 'Danh sách yêu thích có thể đã thay đổi. Hãy mở lại `/yeuthich`.'));
+        }
+        await interaction.deferReply({ ephemeral: true });
+        const res = await enqueueKnownTrack(guild, voiceChannel, interaction.channel, favorites[idx], user.id);
+        if (!res.ok) return interaction.editReply({ content: res.error });
+        return interaction.editReply({
+            content: res.queued
+                ? `✅ Đã thêm **${res.title}** vào hàng đợi (vị trí #${res.position}).`
+                : `▶ Đang phát **${res.title}** từ album yêu thích của bạn.`
+        });
+    }
+
     // ==========================================
     // 🎵 HANDLER SELECT MENU: XOÁ BÀI KHỎI HÀNG ĐỢI NHẠC
     // ==========================================
@@ -7252,6 +7358,21 @@ client.on('interactionCreate', async interaction => {
             const voiceChannel = member.voice?.channel;
             if (!voiceChannel || voiceChannel.id !== mq.voiceChannelId) {
                 return interaction.reply(buildOwnershipRejectPayload('Sai kênh thoại', 'Bạn cần **ở cùng kênh thoại với bot** để điều khiển nhạc.'));
+            }
+
+            // ❤️ NÚT YÊU THÍCH — CÁ NHÂN mỗi người, KHÔNG áp ownership: bất kỳ ai cùng kênh thoại đều
+            // được lưu/bỏ bài vào album yêu thích của RIÊNG họ. Xử lý TRƯỚC gate ownership bên dưới.
+            if (customId === 'music_fav') {
+                const nowFav = musicStore.toggleFavorite(user.id, mq.current);
+                const total = musicStore.getFavorites(user.id).length;
+                return interaction.reply(buildMusicNoticeEphemeral(
+                    nowFav ? 'Đã thêm vào Yêu thích' : 'Đã bỏ khỏi Yêu thích',
+                    (nowFav
+                        ? `**${mq.current.title}** đã được lưu vào album yêu thích của bạn.`
+                        : `**${mq.current.title}** đã được gỡ khỏi album yêu thích của bạn.`) +
+                    `\n> Tổng số bài yêu thích: **${total}**\n-# Xem lại bằng lệnh \`/yeuthich\` hoặc \`miyt\`.`,
+                    nowFav ? 0x57F287 : 0x99AAB5
+                ));
             }
 
             // 🔒 PANEL OWNERSHIP: chỉ người MỞ panel (người dùng lệnh /play - miplay đầu tiên) mới được
