@@ -2092,6 +2092,115 @@ async function findRadioTrack(seedTrack, playedUrls) {
     return null;
 }
 
+// =====================================================================
+// 🎤 LỜI BÀI HÁT (LYRICS) — dùng lrclib.net (API công khai MIỄN PHÍ, KHÔNG cần API key).
+// ---------------------------------------------------------------------
+// lrclib trả cả synced (LRC có timestamp) và plainLyrics. Ta ưu tiên plainLyrics để hiển thị.
+// Không lộ thông tin nhạy cảm, không cần token — an toàn để gọi từ server.
+// =====================================================================
+
+// Làm sạch tiêu đề YouTube để tăng tỉ lệ khớp lyrics: bỏ "(Official Video)", "[MV]", "Lyrics", "ft. ..." v.v.
+function cleanTrackTitle(raw) {
+    let t = String(raw || '');
+    // Bỏ nội dung trong ngoặc () và [] (thường là "Official MV", "Lyrics", "4K"...)
+    t = t.replace(/\([^)]*\)/g, ' ').replace(/\[[^\]]*\]/g, ' ');
+    // Bỏ các từ khóa nhiễu phổ biến
+    t = t.replace(/\b(official|video|audio|mv|m\/v|lyrics?|lyric video|visualizer|hd|hq|4k|full|cover|remix|live|acoustic)\b/gi, ' ');
+    // Bỏ "ft."/"feat." và phần sau
+    t = t.replace(/\b(ft\.?|feat\.?)\b.*$/i, ' ');
+    return t.replace(/[|｜–—-]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+// Tách "Nghệ sĩ - Tên bài" thành { artist, title } nếu có dấu gạch; ngược lại artist rỗng.
+function splitArtistTitle(raw) {
+    const s = String(raw || '');
+    const m = s.match(/^(.+?)\s*[-–—|]\s*(.+)$/);
+    if (m) return { artist: cleanTrackTitle(m[1]), title: cleanTrackTitle(m[2]) };
+    return { artist: '', title: cleanTrackTitle(s) };
+}
+
+// Gọi 1 URL lrclib, trả về object JSON đã parse (hoặc null nếu lỗi/không có).
+function lrclibRequest(pathAndQuery) {
+    return new Promise((resolve) => {
+        const options = {
+            hostname: 'lrclib.net',
+            path: pathAndQuery,
+            method: 'GET',
+            headers: {
+                // lrclib yêu cầu User-Agent nhận dạng ứng dụng (theo hướng dẫn API của họ)
+                'User-Agent': 'MimiBot Discord Music Bot (https://github.com/TranNhan09082003/D-n-MimiBot)',
+                'Accept': 'application/json'
+            }
+        };
+        const req = https.request(options, (res) => {
+            if (res.statusCode !== 200) { res.resume(); return resolve(null); }
+            let data = '';
+            res.on('data', (c) => { data += c; });
+            res.on('end', () => { try { resolve(JSON.parse(data)); } catch { resolve(null); } });
+        });
+        req.on('error', () => resolve(null));
+        req.setTimeout(8000, () => { try { req.destroy(); } catch {} resolve(null); });
+        req.end();
+    });
+}
+
+// Tìm lời bài hát cho 1 track. Thử /api/get (khớp chính xác) rồi /api/search (mờ).
+// Trả { plain, synced, trackName, artistName } hoặc null nếu không tìm thấy.
+async function fetchLyrics(track) {
+    if (!track) return null;
+    const parsed = splitArtistTitle(track.title);
+    const title = parsed.title || cleanTrackTitle(track.title);
+    const artist = parsed.artist;
+    const dur = Number(track.duration) || 0;
+
+    // 1) Thử khớp chính xác nếu đã tách được nghệ sĩ + có thời lượng
+    if (artist && title) {
+        const q = `/api/get?track_name=${encodeURIComponent(title)}&artist_name=${encodeURIComponent(artist)}` +
+            (dur > 0 ? `&duration=${dur}` : '');
+        const exact = await lrclibRequest(q);
+        if (exact && (exact.plainLyrics || exact.syncedLyrics)) {
+            return { plain: exact.plainLyrics || '', synced: exact.syncedLyrics || '', trackName: exact.trackName || title, artistName: exact.artistName || artist };
+        }
+    }
+
+    // 2) Tìm mờ theo từ khóa (title + artist nếu có)
+    const searchTerm = (artist ? `${artist} ${title}` : title).trim();
+    const results = await lrclibRequest(`/api/search?q=${encodeURIComponent(searchTerm)}`);
+    if (Array.isArray(results)) {
+        // Ưu tiên kết quả có plainLyrics và (nếu biết thời lượng) gần khớp thời lượng nhất
+        const withLyrics = results.filter(r => r && (r.plainLyrics || r.syncedLyrics));
+        if (withLyrics.length > 0) {
+            let best = withLyrics[0];
+            if (dur > 0) {
+                best = withLyrics.reduce((a, b) =>
+                    Math.abs((b.duration || 0) - dur) < Math.abs((a.duration || 0) - dur) ? b : a, withLyrics[0]);
+            }
+            return { plain: best.plainLyrics || '', synced: best.syncedLyrics || '', trackName: best.trackName || title, artistName: best.artistName || artist };
+        }
+    }
+    return null;
+}
+
+// 🎤 Payload hiển thị lời bài hát dạng Components V2. Lyrics dài -> cắt an toàn theo giới hạn ký tự.
+// Mỗi TextDisplay của Discord tối đa ~4000 ký tự; ta cắt phần lời còn ~3500 để chừa chỗ tiêu đề.
+function buildLyricsPayload(title, lyric, sourceNote = '') {
+    const container = new ContainerBuilder().setAccentColor(0x1DB954);
+    container.addTextDisplayComponents(new TextDisplayBuilder().setContent(`## Lời bài hát\n### ${title}`));
+    container.addSeparatorComponents(new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small));
+    let body = String(lyric || '').trim();
+    const LIMIT = 3500;
+    let truncated = false;
+    if (body.length > LIMIT) { body = body.slice(0, LIMIT); truncated = true; }
+    container.addTextDisplayComponents(new TextDisplayBuilder().setContent(body || '*Không có nội dung lời.*'));
+    if (truncated || sourceNote) {
+        container.addSeparatorComponents(new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small));
+        const foot = [truncated ? '-# Lời quá dài, đã hiển thị phần đầu.' : '', sourceNote ? `-# ${sourceNote}` : '']
+            .filter(Boolean).join('\n');
+        container.addTextDisplayComponents(new TextDisplayBuilder().setContent(foot));
+    }
+    return { components: [container], flags: MessageFlags.IsComponentsV2 };
+}
+
 // Ảnh dự phòng khi bài hát không có thumbnail (ThumbnailBuilder yêu cầu URL hợp lệ, null sẽ lỗi)
 const MUSIC_FALLBACK_THUMB = 'https://i.imgur.com/OaJ8Yqp.png';
 
@@ -2199,7 +2308,8 @@ function buildMusicRows(mq) {
         new ActionRowBuilder().addComponents(
             new ButtonBuilder().setCustomId('music_autoplay').setLabel(mq.autoplay ? '📻 Autoplay: Bật' : '📻 Autoplay: Tắt').setStyle(mq.autoplay ? ButtonStyle.Success : ButtonStyle.Secondary),
             new ButtonBuilder().setCustomId('music_247').setLabel(mq.stay247 ? '🔁 24/7: Bật' : '🔁 24/7: Tắt').setStyle(mq.stay247 ? ButtonStyle.Success : ButtonStyle.Secondary),
-            new ButtonBuilder().setCustomId('music_effect').setLabel(mq.effect && mq.effect !== 'none' ? `🎚️ ${AUDIO_EFFECTS[mq.effect]?.label || 'Hiệu ứng'}` : '🎚️ Hiệu ứng').setStyle(mq.effect && mq.effect !== 'none' ? ButtonStyle.Success : ButtonStyle.Secondary)
+            new ButtonBuilder().setCustomId('music_effect').setLabel(mq.effect && mq.effect !== 'none' ? `🎚️ ${AUDIO_EFFECTS[mq.effect]?.label || 'Hiệu ứng'}` : '🎚️ Hiệu ứng').setStyle(mq.effect && mq.effect !== 'none' ? ButtonStyle.Success : ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId('music_lyrics').setLabel('🎤 Lời bài hát').setStyle(ButtonStyle.Secondary)
         )
     ];
 }
@@ -3808,6 +3918,11 @@ client.once('ready', async () => {
                 .addIntegerOption(o => o.setName('phần_trăm').setDescription('Từ 0 đến 150').setRequired(true).setMinValue(0).setMaxValue(150))),
 
         new SlashCommandBuilder()
+            .setName('loibaihat')
+            .setDescription('Xem lời bài hát đang phát, hoặc tìm lời theo tên bài')
+            .addStringOption(o => o.setName('tên_bài').setDescription('Tên bài muốn tìm lời. Bỏ trống = bài đang phát.').setRequired(false)),
+
+        new SlashCommandBuilder()
             .setName('help')
             .setDescription('Xem bảng hướng dẫn sử dụng tất cả các tính năng của bot')
     ];
@@ -5204,6 +5319,27 @@ client.on('messageCreate', async (message) => {
         await playNextTrack(message.guild.id, { replayCurrent: true, seekSec: resumeSec, effectKey: rest });
         if (mq.nowPlayingMessage) mq.nowPlayingMessage.edit(buildMusicPayload(mq)).catch(() => null);
         return noticeV2('Đã đổi hiệu ứng', `Đang áp **${AUDIO_EFFECTS[rest].label}** từ vị trí \`${formatDuration(resumeSec)}\`.`, 0x57F287);
+    }
+
+    // 🎤 Lời bài hát qua prefix: miloi / milyrics [tên bài]. Không tên -> lấy bài đang phát.
+    if (command === 'miloi' || command === 'milyrics' || command === 'miloibaihat') {
+        const rest = message.content.slice(args[0].length).trim();
+        const mq = musicQueues.get(message.guild.id);
+        let seedTrack;
+        if (rest) seedTrack = { title: rest, duration: 0 };
+        else if (mq && mq.current) seedTrack = mq.current;
+        else {
+            return message.reply({ components: [buildMusicNoticeContainer('Không có bài để tra lời', 'Hãy phát một bài trước, hoặc dùng `miloi <tên bài>`.', 0xF1C40F)], flags: MessageFlags.IsComponentsV2, allowedMentions: { repliedUser: false } }).catch(() => null);
+        }
+        const thinking = await message.reply({ components: [buildMusicNoticeContainer('Đang tìm lời...', `Đang tra lời cho **${seedTrack.title}**.`, 0x5865F2)], flags: MessageFlags.IsComponentsV2, allowedMentions: { repliedUser: false } }).catch(() => null);
+        const lyr = await fetchLyrics(seedTrack);
+        if (!lyr || (!lyr.plain && !lyr.synced)) {
+            const p = { components: [buildMusicNoticeContainer('Không tìm thấy lời', `Không tìm được lời cho **${seedTrack.title}**.\n> Thử: \`miloi tên nghệ sĩ - tên bài\`.`, 0xF1C40F)], flags: MessageFlags.IsComponentsV2 };
+            return thinking ? thinking.edit(p).catch(() => null) : message.reply({ ...p, allowedMentions: { repliedUser: false } }).catch(() => null);
+        }
+        const heading = `${lyr.artistName ? lyr.artistName + ' — ' : ''}${lyr.trackName}`;
+        const payload = buildLyricsPayload(heading, lyr.plain || lyr.synced, 'Nguồn: lrclib.net');
+        return thinking ? thinking.edit(payload).catch(() => null) : message.reply({ ...payload, allowedMentions: { repliedUser: false } }).catch(() => null);
     }
 
     if (command === 'mialbum' || command === 'mial') {
@@ -7519,6 +7655,29 @@ client.on('interactionCreate', async interaction => {
             }
         }
 
+        if (commandName === 'loibaihat') {
+            const queryName = options.getString('tên_bài');
+            const mq = musicQueues.get(guild.id);
+            // Xác định track cần tra lời: ưu tiên tên người dùng nhập, ngược lại bài đang phát.
+            let seedTrack;
+            if (queryName) seedTrack = { title: queryName, duration: 0 };
+            else if (mq && mq.current) seedTrack = mq.current;
+            else {
+                return interaction.reply(buildMusicNoticeEphemeral('Không có bài để tra lời', 'Hãy phát một bài trước, hoặc dùng `/loibaihat tên_bài:<tên>` để tìm.', 0xF1C40F));
+            }
+            await interaction.deferReply();
+            const lyr = await fetchLyrics(seedTrack);
+            if (!lyr || (!lyr.plain && !lyr.synced)) {
+                return interaction.editReply(buildMusicNoticeEphemeral(
+                    'Không tìm thấy lời',
+                    `Không tìm được lời cho **${seedTrack.title}**.\n> Thử lại với tên chuẩn hơn: \`/loibaihat tên_bài:tên nghệ sĩ - tên bài\`.`,
+                    0xF1C40F
+                )).catch(() => null);
+            }
+            const heading = `${lyr.artistName ? lyr.artistName + ' — ' : ''}${lyr.trackName}`;
+            return interaction.editReply(buildLyricsPayload(heading, lyr.plain || lyr.synced, 'Nguồn: lrclib.net')).catch(() => null);
+        }
+
         if (commandName === 'queue') {
             const mq = musicQueues.get(guild.id);
             if (!mq || (!mq.current && mq.queue.length === 0)) {
@@ -7898,6 +8057,23 @@ client.on('interactionCreate', async interaction => {
                     `\n> Tổng số bài yêu thích: **${total}**\n-# Xem lại bằng lệnh \`/yeuthich\` hoặc \`miyt\`.`,
                     nowFav ? 0x57F287 : 0x99AAB5
                 ));
+            }
+
+            // 🎤 LỜI BÀI HÁT — CÁ NHÂN (ephemeral), ai cùng kênh cũng xem được. Trước gate ownership.
+            if (customId === 'music_lyrics') {
+                await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => null);
+                const lyr = await fetchLyrics(mq.current);
+                if (!lyr || (!lyr.plain && !lyr.synced)) {
+                    return interaction.editReply(buildMusicNoticeEphemeral(
+                        'Không tìm thấy lời',
+                        `Không tìm được lời cho **${mq.current.title}**.\n> Thử \`/loibaihat tên_bài:tên nghệ sĩ - tên bài\`.`,
+                        0xF1C40F
+                    )).catch(() => null);
+                }
+                const heading = `${lyr.artistName ? lyr.artistName + ' — ' : ''}${lyr.trackName}`;
+                const p = buildLyricsPayload(heading, lyr.plain || lyr.synced, 'Nguồn: lrclib.net');
+                // buildLyricsPayload không kèm Ephemeral; editReply của defer ephemeral vẫn giữ ephemeral.
+                return interaction.editReply({ components: p.components, flags: MessageFlags.IsComponentsV2 }).catch(() => null);
             }
 
             // ⏭️ VOTE-SKIP — xử lý TRƯỚC gate: người có quyền (DJ/owner/admin) skip NGAY; người thường
