@@ -1,0 +1,8 @@
+node_modules/
+config.json
+economy.json
+tickets.json
+created_channels.json
+*.tmp
+*.log
+.env

@@ -1,0 +1,11 @@
+.git
+.github
+node_modules
+.env
+__pycache__
+*.log
+*.tmp
+*.bak
+*.txt
+created_channels.json
+*.json.tmp

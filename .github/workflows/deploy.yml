@@ -1,0 +1,58 @@
+name: Deploy MimiBot to VibeHost
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    name: Deploy Application
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: SFTP Deploy to VibeHost
+        uses: wlixcc/SFTP-Deploy-Action@v1.2.6
+        with:
+          server: 'hcm3.vibehost.vn'
+          port: 2022
+          username: 'nhan98-889566.9d9f7a18'
+          password: ${{ secrets.SFTP_PASSWORD }}
+          local_path: './'
+          remote_path: './'
+          sftp_only: true
+          sftp_args: '-o ConnectTimeout=5'
+          args: '--exclude=node_modules --exclude=.git --exclude=.github --exclude=created_channels.json --exclude=*.tmp --exclude=*.log --exclude=*.json.tmp'
+
+      - name: Restart Bot via Pterodactyl API
+        env:
+          PANEL_URL: ${{ secrets.PTERO_PANEL_URL }}
+          API_KEY: ${{ secrets.PTERO_API_KEY }}
+          SERVER_ID: ${{ secrets.PTERO_SERVER_ID }}
+        run: |
+          if [ -z "$PANEL_URL" ] || [ -z "$API_KEY" ] || [ -z "$SERVER_ID" ]; then
+            echo "⚠️ Chưa cấu hình đủ secret (PTERO_PANEL_URL / PTERO_API_KEY / PTERO_SERVER_ID) — bỏ qua bước restart."
+            echo "   Bot sẽ chạy code mới ở lần restart thủ công tiếp theo."
+            exit 0
+          fi
+          # Bỏ dấu / thừa ở cuối panel URL nếu có
+          PANEL_URL="${PANEL_URL%/}"
+          echo "🔄 Gửi lệnh restart tới server $SERVER_ID ..."
+          HTTP_CODE=$(curl -s -o /tmp/ptero_resp.txt -w "%{http_code}" \
+            -X POST "$PANEL_URL/api/client/servers/$SERVER_ID/power" \
+            -H "Authorization: Bearer $API_KEY" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            -d '{"signal":"restart"}')
+          echo "HTTP status: $HTTP_CODE"
+          if [ "$HTTP_CODE" = "204" ]; then
+            echo "✅ Đã gửi lệnh restart thành công — bot đang khởi động lại với code mới."
+          else
+            echo "❌ Restart thất bại (HTTP $HTTP_CODE). Phản hồi:"
+            cat /tmp/ptero_resp.txt || true
+            echo ""
+            echo "👉 Kiểm tra lại secret PTERO_PANEL_URL / PTERO_API_KEY / PTERO_SERVER_ID."
+            exit 1
+          fi
