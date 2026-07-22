@@ -1,53 +1,50 @@
-# Mimi — Hệ sinh thái bot nhạc Discord
+# 🎵 Mimi — Discord Music Bot & Community Ecosystem
 
-Mimi gồm ba phần chạy cùng nhau:
+> Mimi biến voice channel Discord thành một không gian âm nhạc sống động, thân thiện và dễ sử dụng, nơi cộng đồng có thể cùng nghe, khám phá và chia sẻ âm nhạc.
 
-| Thành phần | Vị trí | Vai trò |
-|-----------|--------|---------|
-| **Bot Discord** | gốc repo (`index.js`) | Phát nhạc, TTS, kinh tế, xác minh, ticket… |
-| **Internal API** | `internalApi.js` | HTTP server nội bộ trong tiến trình bot, cho website gọi vào |
-| **Website + Dashboard** | `web/` | Trang giới thiệu (Next.js) + dashboard quản lý qua đăng nhập Discord |
+---
 
-Website và bot **không dùng chung tiến trình**. Web gọi bot qua Internal API bằng một service token bí mật, theo mô hình server-to-server.
+## 🌟 Tính Năng Nổi Bật
 
-```
-Trình duyệt ──▶ Next.js (server) ──Bearer token──▶ Internal API ──▶ Bot Discord
-     ▲               │
-     └── OAuth Discord (identify + guilds)
-```
+- 🎶 **Smart Music Player:** Hỗ trợ phát nhạc chất lượng cao từ nhiều nguồn với bộ nút điều khiển trực quan.
+- 🛡️ **Hệ Thống Xác Thực Đa Chế Độ:** Xác thực thông thường hoặc tự động reset 24 giờ (00:00 múi giờ Việt Nam UTC+7).
+- 🕒 **Chấm Công Độc Lập:** Quản lý giờ công nhân sự tách biệt hoàn toàn với xác thực.
+- 🚨 **Cảnh Báo Bất Thường Economy:** Tự động giám sát thu nhập > 5.000.000 xu/ngày và cảnh báo tới Bot Owner.
+- 📬 **Owner Forwarding:** Chuyển tiếp tin nhắn DM và tag mention trực tiếp đến Bot Owner.
+- 🌐 **Máy Chủ Hỗ Trợ:** [Tham gia Mimi Support Server](https://discord.gg/q8CfajzPuc)
 
-## Bắt đầu nhanh
+---
 
-### 1. Bot
+## 🚀 Hướng Dẫn Chạy Môi Trường Local
 
-```bash
-npm install
-# Điền token vào config.json: { "token": "...", "clientId": "..." }
-# (tuỳ chọn) đặt MIMI_API_TOKEN để bật Internal API — xem .env.example
-node index.js
-```
+### Yêu cầu:
+- Node.js v20.18.0 trở lên
+- npm 10+
 
-Nếu không đặt `MIMI_API_TOKEN`, bot vẫn chạy bình thường nhưng Internal API sẽ **không** khởi động (an toàn — không mở cổng không xác thực).
-
-### 2. Website
+### Các bước cài đặt:
 
 ```bash
-cd web
-cp .env.example .env.local   # rồi điền giá trị
-npm install
-npm run dev                  # http://localhost:3000
+# 1. Cài đặt dependencies
+npm install --ignore-scripts
+
+# 2. Tạo cấu hình môi trường
+cp .env.example .env
+
+# 3. Kiểm tra cú pháp & chạy unit test
+npm run check
+npm run test
+
+# 4. Khởi chạy bot
+npm start
 ```
 
-## Tài liệu
+---
 
-- [Kiến trúc](docs/ARCHITECTURE.md) — cách các phần ghép với nhau, luồng dữ liệu
-- [Triển khai](docs/DEPLOYMENT.md) — deploy bot (VibeHost/SFTP) và web (Nhân Hòa)
-- [Bảo mật](docs/SECURITY.md) — mô hình xác thực, token, quyền, xử lý dữ liệu
-- [AGENTS.md](AGENTS.md) — quy ước cho người/agent làm việc trên repo này
+## 📄 Tài Liệu Hệ Thống
 
-## Nguyên tắc dự án
-
-- **An toàn dữ liệu trước tiên**: không thay đổi phá vỡ cấu hình bot hiện có; ghi file cấu hình theo kiểu ghi tạm rồi rename.
-- **Không bịa số liệu**: mọi số liệu (server, người dùng, uptime) đều lấy thật từ bot; khi chưa có thì hiển thị trạng thái trung tính ("Đang đồng bộ").
-- **Chỉ quảng bá tính năng có thật**: danh sách tính năng đối chiếu trực tiếp với mã nguồn bot.
-- **Tối thiểu quyền**: OAuth chỉ xin `identify` + `guilds`; Internal API dùng allowlist cho các khoá cấu hình được sửa.
+- [Kiến trúc hệ thống (ARCHITECTURE.md)](ARCHITECTURE.md)
+- [Quy trình Deployment (DEPLOYMENT.md)](DEPLOYMENT.md)
+- [Chính sách Bảo mật (SECURITY.md)](SECURITY.md)
+- [Hướng dẫn Đóng góp (CONTRIBUTING.md)](CONTRIBUTING.md)
+- [Nhật ký thay đổi (CHANGELOG.md)](CHANGELOG.md)
+- [Hướng dẫn cho AI Agents (AGENTS.md)](AGENTS.md)

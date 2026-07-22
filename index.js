@@ -42,7 +42,7 @@ function formatTimeVN(dateOrMs) {
 const OWNER_ID = '1143387904064888942';  // ID duy nhất có quyền quản lý xu đặc biệt
 const MAX_BALANCE = 999_999_999_999;    // Giới hạn xu tối đa (vĩnh viễn cho OWNER)
 const HOME_GUILD_ID = '1517068246493429852'; // Server cố định — chỉ cho phép dùng /resetbot tại đây
-const SUPPORT_LINK = 'https://discord.gg/cn535DxCn7';
+const SUPPORT_LINK = process.env.DISCORD_SUPPORT_URL || 'https://discord.gg/q8CfajzPuc';
 
 const configPath = path.join(__dirname, 'config.json');
 let config = {};
@@ -186,7 +186,7 @@ function buildDonateEmbed() {
         .setColor(colors.THEME)
         .setTitle('💖 THÔNG TIN ỦNG HỘ (DONATE)')
         .setDescription(
-            `> Mọi sự đóng góp của bạn đều giúp dự án duy trì máy chủ 24/7 tại VibeHost!\n\n` +
+            `> Mọi sự đóng góp của bạn đều giúp dự án duy trì máy chủ 24/7 tại Mimi Bot!\n\n` +
             `- **Ngân hàng:** Vietcombank (VCB)\n` +
             `- **Số tài khoản:** \`${accountNo}\`\n` +
             `- **Chủ tài khoản:** \`${accountName}\`\n` +
@@ -200,11 +200,36 @@ function buildDonateEmbed() {
     const button = new ButtonBuilder()
         .setLabel('🔗 Tải mã QR gốc')
         .setStyle(ButtonStyle.Link)
-        .setUrl(qrUrl);
+        .setURL(qrUrl);
 
     const row = new ActionRowBuilder().addComponents(button);
 
     return { embed, components: [row] };
+}
+
+// Tạo (nếu chưa có) hoặc dùng lại kênh ☕-donate, rồi làm mới nội dung donate + mã QR.
+// Dùng chung cho lệnh /setupdonate. TÁCH BIỆT hoàn toàn với /setup.
+// Trả về kênh donate, hoặc null nếu không tạo được.
+async function ensureDonateChannel(guild, gConfig) {
+    let donateChan = guild.channels.cache.get(gConfig.donateChannelId)
+        || guild.channels.cache.find(ch => ch.type === ChannelType.GuildText && ch.name.includes('donate'));
+
+    if (!donateChan) {
+        donateChan = await guild.channels.create({
+            name: '☕-donate', type: ChannelType.GuildText,
+            permissionOverwrites: [{ id: guild.id, allow: [PermissionFlagsBits.ViewChannel], deny: [PermissionFlagsBits.SendMessages] }]
+        }).catch(() => null);
+        if (!donateChan) return null;
+    }
+
+    gConfig.donateChannelId = donateChan.id;
+    saveConfig();
+
+    await clearBotMessages(donateChan);
+    const donateData = buildDonateEmbed();
+    await donateChan.send({ embeds: [donateData.embed], components: donateData.components }).catch(() => null);
+
+    return donateChan;
 }
 
 function removeAccentsAndSpaces(str) {
@@ -352,6 +377,77 @@ if (fs.existsSync(economyPath)) {
     } catch (e) {
         economyData = {};
     }
+}
+
+async function sendEconomyOwnerAlert(userId, guildId, totalEarned, threshold, currentBalance, sources) {
+    try {
+        const ownerUser = await client.users.fetch(OWNER_ID).catch(() => null);
+        const targetGuild = guildId ? client.guilds.cache.get(guildId) : null;
+        const targetUser = await client.users.fetch(userId).catch(() => null);
+        const dateStr = nowVN().toISOString().slice(0, 10).replace(/-/g, '');
+        const alertId = `MIMI-ECO-${dateStr}-${userId.slice(-4)}`;
+
+        const sourceSummary = Object.entries(sources || {})
+            .map(([src, amt]) => `• ${src}: **${amt.toLocaleString()} xu**`)
+            .join('\n');
+
+        const alertEmbed = new EmbedBuilder()
+            .setColor('#E74C3C')
+            .setTitle('🚨 CẢNH BÁO KINH TẾ MIMI (VƯỢT NGƯỠNG THU NHẬP)')
+            .setDescription(
+                `👤 **Người dùng:** ${targetUser ? targetUser.tag : userId}\n` +
+                `🆔 **User ID:** \`${userId}\`\n` +
+                `🏰 **Server:** ${targetGuild ? targetGuild.name : (guildId || 'N/A')} (\`${guildId || 'N/A'}\`)\n\n` +
+                `📈 **Tổng thu nhập hôm nay:** **${totalEarned.toLocaleString()} xu**\n` +
+                `🎯 **Ngưỡng cảnh báo:** **${threshold.toLocaleString()} xu**\n` +
+                `💰 **Số dư hiện tại:** **${currentBalance.toLocaleString()} xu**\n\n` +
+                `📊 **Chi tiết nguồn thu nhập:**\n${sourceSummary || 'N/A'}\n\n` +
+                `🕒 **Thời gian:** ${formatTimeVN(Date.now())} (Asia/Ho_Chi_Minh)\n` +
+                `🏷️ **Alert ID:** \`${alertId}\``
+            )
+            .setFooter({ text: 'Mimi Economy Security Guard' });
+
+        if (ownerUser) {
+            await ownerUser.send({ embeds: [alertEmbed] }).catch(async (err) => {
+                console.warn(`⚠️ [Economy Alert] Không thể gửi DM cho Owner (${OWNER_ID}): ${err.message}`);
+                if (process.env.OWNER_LOG_CHANNEL_ID) {
+                    const logChan = client.channels.cache.get(process.env.OWNER_LOG_CHANNEL_ID);
+                    if (logChan) await logChan.send({ embeds: [alertEmbed] }).catch(() => null);
+                }
+            });
+        }
+    } catch (err) {
+        console.error('❌ Lỗi khi gửi cảnh báo economy:', err);
+    }
+}
+
+function recordEconomyIncome(userId, guildId, amount, source) {
+    if (!economyData[userId]) {
+        economyData[userId] = { balance: userId === OWNER_ID ? MAX_BALANCE : 100, lastDaily: "" };
+    }
+    const user = economyData[userId];
+    if (userId === OWNER_ID) {
+        user.balance = MAX_BALANCE;
+        return;
+    }
+
+    const todayKey = nowVN().toISOString().slice(0, 10);
+    if (!user.dailyEarnings || user.dailyEarnings.dateKey !== todayKey) {
+        user.dailyEarnings = { dateKey: todayKey, totalEarned: 0, alertSent: false, sources: {} };
+    }
+
+    const numAmount = Number(amount) || 0;
+    user.dailyEarnings.totalEarned += numAmount;
+    if (!user.dailyEarnings.sources) user.dailyEarnings.sources = {};
+    user.dailyEarnings.sources[source] = (user.dailyEarnings.sources[source] || 0) + numAmount;
+
+    const THRESHOLD = Number(process.env.ECONOMY_DAILY_ALERT_THRESHOLD) || 5_000_000;
+    if (user.dailyEarnings.totalEarned >= THRESHOLD && !user.dailyEarnings.alertSent) {
+        user.dailyEarnings.alertSent = true;
+        sendEconomyOwnerAlert(userId, guildId, user.dailyEarnings.totalEarned, THRESHOLD, user.balance, user.dailyEarnings.sources);
+    }
+
+    saveEconomy();
 }
 
 function saveEconomy() {
@@ -678,7 +774,7 @@ async function updateGiveawayEmbed(channel, msgId, gData, ended = false) {
             new ButtonBuilder()
                 .setLabel('🌐 Máy Chủ Hỗ Trợ')
                 .setStyle(ButtonStyle.Link)
-                .setURL('https://discord.gg/cn535DxCn7')
+                .setURL('https://discord.gg/q8CfajzPuc')
         );
     } else {
         // Đang chạy: nút Tham Gia + End sớm + Link hỗ trợ
@@ -694,7 +790,7 @@ async function updateGiveawayEmbed(channel, msgId, gData, ended = false) {
             new ButtonBuilder()
                 .setLabel('🌐 Máy Chủ Hỗ Trợ')
                 .setStyle(ButtonStyle.Link)
-                .setURL('https://discord.gg/cn535DxCn7')
+                .setURL('https://discord.gg/q8CfajzPuc')
         );
     }
 
@@ -1203,7 +1299,7 @@ async function rebuildGuildPanels(targetGuild, gCfg) {
             await clearBotMessages(ticketChan);
             const row = new ActionRowBuilder().addComponents(
                 new ButtonBuilder().setCustomId('create_ticket_btn:Default').setLabel('📩 Tạo Ticket').setStyle(ButtonStyle.Primary),
-                new ButtonBuilder().setLabel('🌐 Máy Chủ Hỗ Trợ').setStyle(ButtonStyle.Link).setURL('https://discord.gg/cn535DxCn7')
+                new ButtonBuilder().setLabel('🌐 Máy Chủ Hỗ Trợ').setStyle(ButtonStyle.Link).setURL('https://discord.gg/q8CfajzPuc')
             );
             const sent = await sendToRestrictedChannel(ticketChan, {
                 embeds: [new EmbedBuilder().setColor('#5865F2').setTitle('📩 Hệ Thống Hỗ Trợ').setDescription('Nhấn vào nút bên dưới để điền Form mở Ticket ẩn.')],
@@ -1252,7 +1348,7 @@ async function rebuildGuildPanels(targetGuild, gCfg) {
                     .setFooter({ text: 'Nhấn nút dưới đây để xác thực bạn không phải là Bot' });
                 const verifyRow = new ActionRowBuilder().addComponents(
                     new ButtonBuilder().setCustomId('verify_btn').setLabel('✅ Xác Thực Ngay').setStyle(ButtonStyle.Success),
-                    new ButtonBuilder().setLabel('🌐 Máy Chủ Hỗ Trợ').setStyle(ButtonStyle.Link).setURL('https://discord.gg/cn535DxCn7')
+                    new ButtonBuilder().setLabel('🌐 Máy Chủ Hỗ Trợ').setStyle(ButtonStyle.Link).setURL('https://discord.gg/q8CfajzPuc')
                 );
                 const sent = await sendToRestrictedChannel(verifyChan, { embeds: [verifyEmbed], components: [verifyRow] });
                 rebuildLog.push(sent ? `  🛡️ Gửi lại nút Xác Thực → <#${verifyChan.id}>` : `  ❌ Gửi nút Xác Thực thất bại`);
@@ -1308,7 +1404,7 @@ async function rebuildGuildPanels(targetGuild, gCfg) {
                     .setFooter({ text: 'Voice Room System — Tự động & riêng tư' });
                 const vrRow = new ActionRowBuilder().addComponents(
                     new ButtonBuilder().setCustomId('voiceroom_settings_btn').setLabel('⚙️ Quản Lý Phòng Của Tôi').setStyle(ButtonStyle.Primary),
-                    new ButtonBuilder().setLabel('🌐 Máy Chủ Hỗ Trợ').setStyle(ButtonStyle.Link).setURL('https://discord.gg/cn535DxCn7')
+                    new ButtonBuilder().setLabel('🌐 Máy Chủ Hỗ Trợ').setStyle(ButtonStyle.Link).setURL('https://discord.gg/q8CfajzPuc')
                 );
                 const sent = await sendToRestrictedChannel(vrControlChan, { embeds: [vrEmbed], components: [vrRow] });
                 rebuildLog.push(sent ? `  🔊 Gửi lại bảng Voice Room → <#${vrControlChan.id}>` : `  ❌ Gửi bảng Voice Room thất bại`);
@@ -1335,13 +1431,19 @@ async function setupVerifySystem(guild, gConfig) {
     try {
         let unverifiedRole = gConfig.unverifiedRoleId ? guild.roles.cache.get(gConfig.unverifiedRoleId) : null;
         if (!unverifiedRole) {
-            unverifiedRole = await guild.roles.create({ name: '🔒 Chưa Xác Thực', color: '#95A5A6', reason: 'Khởi tạo hệ thống xác thực (kèm /setup)' });
+            unverifiedRole = guild.roles.cache.find(r => r.name === '🔒 Chưa Xác Thực' || r.name === 'Chưa Xác Thực');
+        if (!unverifiedRole) {
+            unverifiedRole = await guild.roles.create({ name: '🔒 Chưa Xác Thực', color: '#95A5A6', reason: 'Khởi tạo hệ thống xác thực' });
+        }
         }
         gConfig.unverifiedRoleId = unverifiedRole.id;
 
         let verifiedRole = gConfig.verifiedRoleId ? guild.roles.cache.get(gConfig.verifiedRoleId) : null;
         if (!verifiedRole) {
-            verifiedRole = await guild.roles.create({ name: '✅ Đã Xác Thực', color: '#2ECC71', reason: 'Khởi tạo hệ thống xác thực (kèm /setup)' });
+            verifiedRole = guild.roles.cache.find(r => r.name === '✅ Đã Xác Thực' || r.name === 'Đã Xác Thực');
+        if (!verifiedRole) {
+            verifiedRole = await guild.roles.create({ name: '✅ Đã Xác Thực', color: '#2ECC71', reason: 'Khởi tạo hệ thống xác thực' });
+        }
         }
         gConfig.verifiedRoleId = verifiedRole.id;
 
@@ -1390,7 +1492,7 @@ async function setupVerifySystem(guild, gConfig) {
             .setFooter({ text: 'Nhấn nút dưới đây để xác thực bạn không phải là Bot' });
         const verifyRow = new ActionRowBuilder().addComponents(
             new ButtonBuilder().setCustomId('verify_btn').setLabel('✅ Xác Thực Ngay').setStyle(ButtonStyle.Success),
-            new ButtonBuilder().setLabel('🌐 Máy Chủ Hỗ Trợ').setStyle(ButtonStyle.Link).setURL('https://discord.gg/cn535DxCn7')
+            new ButtonBuilder().setLabel('🌐 Máy Chủ Hỗ Trợ').setStyle(ButtonStyle.Link).setURL('https://discord.gg/q8CfajzPuc')
         );
         await verifyChannel.send({ embeds: [verifyEmbed], components: [verifyRow] });
 
@@ -1410,6 +1512,25 @@ async function setupVerifySystem(guild, gConfig) {
 // Không có role Chưa Xác Thực → thành viên cũ vẫn nhìn thấy mọi kênh
 // như bình thường, khiến hệ thống xác thực coi như không có tác dụng.
 // -----------------------------------------------------------------
+// -----------------------------------------------------------------
+// 🔓 HÀM MỞ LẠI CÁC KÊNH KHI TẮT HỆ THỐNG XÁC THỰC
+// -----------------------------------------------------------------
+async function reopenLockedChannels(guild, gConfig) {
+    const unverifiedRole = gConfig.unverifiedRoleId 
+        ? guild.roles.cache.get(gConfig.unverifiedRoleId) 
+        : guild.roles.cache.find(r => r.name === '🔒 Chưa Xác Thực' || r.name === 'Chưa Xác Thực');
+
+    if (unverifiedRole) {
+        const unlockPromises = [];
+        guild.channels.cache.forEach(ch => {
+            if (ch.permissionOverwrites?.cache?.has(unverifiedRole.id)) {
+                unlockPromises.push(ch.permissionOverwrites.delete(unverifiedRole.id).catch(() => null));
+            }
+        });
+        await Promise.all(unlockPromises);
+    }
+}
+
 async function assignVerifyRolesToAllMembers(guild, gConfig) {
     const stats = { unverifiedAssigned: 0, verifiedBotAssigned: 0, alreadyVerified: 0, failed: 0 };
     if (!gConfig.unverifiedRoleId && !gConfig.verifiedRoleId) return stats;
@@ -1574,6 +1695,75 @@ function startDailyVerifyReset() {
 }
 
 // -----------------------------------------------------------------
+// 🗓️ JOB RESET BỘ ĐẾM KỶ LUẬT HÀNG THÁNG (00:00 NGÀY 1 — MÚI GIỜ VIỆT NAM UTC+7)
+// Mỗi đầu tháng, đưa Cảnh cáo / Mute / Kick / Ban của mọi thành viên về 0 để
+// bắt đầu chu kỳ leo thang mới. Lịch sử chi tiết (historyLog) vẫn được giữ lại.
+// Dùng cùng cơ chế "kiểm tra mỗi 30 giây theo giờ VN" như job reset xác thực 24h.
+// -----------------------------------------------------------------
+function startMonthlyModReset() {
+    let lastResetMonth = null;
+
+    setInterval(() => {
+        const nowVN = new Date(Date.now() + VN_OFFSET * 3_600_000);
+        const hhVN = nowVN.getUTCHours();
+        const mmVN = nowVN.getUTCMinutes();
+        const dayVN = nowVN.getUTCDate();
+        const monthKeyVN = `${nowVN.getUTCFullYear()}-${nowVN.getUTCMonth()}`;
+
+        // Chỉ kích hoạt đúng 00:00 VN ngày 1 hàng tháng, và chỉ 1 lần mỗi tháng
+        if (dayVN !== 1 || hhVN !== 0 || mmVN !== 0) return;
+        if (lastResetMonth === monthKeyVN) return;
+        lastResetMonth = monthKeyVN;
+
+        console.log(`🗓️ [ModReset] Bắt đầu reset bộ đếm kỷ luật đầu tháng — ${new Date().toISOString()}`);
+
+        let totalGuilds = 0;
+        let totalMembers = 0;
+        for (const guildId in config.guilds) {
+            const gConfig = config.guilds[guildId];
+            if (!gConfig.modHistory) continue;
+
+            let resetCount = 0;
+            for (const memberId in gConfig.modHistory) {
+                const record = gConfig.modHistory[memberId];
+                if (!record) continue;
+                if ((record.warnCount || 0) === 0 && (record.muteCount || 0) === 0 &&
+                    (record.kickCount || 0) === 0 && (record.banCount || 0) === 0) continue;
+
+                record.warnCount = 0;
+                record.muteCount = 0;
+                record.kickCount = 0;
+                record.banCount = 0;
+                resetCount++;
+            }
+
+            if (resetCount > 0) {
+                totalGuilds++;
+                totalMembers += resetCount;
+
+                // Ghi nhật ký quản trị (nếu server có bật kênh nhật ký)
+                const guild = client.guilds.cache.get(guildId);
+                if (guild) {
+                    const resetEmbed = new EmbedBuilder()
+                        .setColor('#3498DB')
+                        .setTitle('🗓️ Reset Bộ Đếm Kỷ Luật Hàng Tháng')
+                        .setDescription(
+                            `Đầu tháng mới — hệ thống đã đưa bộ đếm **Cảnh cáo / Mute / Kick / Ban** của ` +
+                            `**${resetCount}** thành viên về **0**.\n` +
+                            `Lịch sử chi tiết vẫn được giữ nguyên; chỉ số đếm leo thang được làm mới.`
+                        )
+                        .setTimestamp();
+                    sendModLog(guild, gConfig, { embeds: [resetEmbed] });
+                }
+            }
+        }
+
+        saveConfig();
+        console.log(`✅ [ModReset] Đã reset bộ đếm kỷ luật cho ${totalMembers} thành viên trên ${totalGuilds} server.`);
+    }, 30000); // Kiểm tra mỗi 30 giây để không bỏ lỡ mốc 00:00 ngày 1
+}
+
+// -----------------------------------------------------------------
 // 🎵 HỆ THỐNG NGHE NHẠC YOUTUBE (TÌM KIẾM + ĐIỀU KHIỂN BẰNG NÚT BẤM)
 // Yêu cầu cài thêm: npm install @discordjs/voice yt-dlp-exec libsodium-wrappers
 // Yêu cầu cài thêm trên máy chủ (không phải qua npm): yt-dlp
@@ -1651,27 +1841,44 @@ function downloadFileFollowRedirect(url, destPath, redirectsLeft = 5) {
     });
 }
 
+// yt-dlp cũ là NGUYÊN NHÂN CHÍNH gây lỗi "HTTP Error 403: Forbidden" khi phát nhạc:
+// YouTube đổi cơ chế chống bot gần như hằng tuần, nên nếu để bản binary cũ nằm mãi trên
+// host thì sớm muộn cũng bị chặn. Ta coi binary quá 2 ngày là "cũ" và tự tải lại bản mới nhất.
+const YTDLP_MAX_AGE_MS = 2 * 24 * 60 * 60 * 1000; // 2 ngày
+function isYtDlpFresh() {
+    try {
+        return (Date.now() - fs.statSync(YTDLP_BIN_PATH).mtimeMs) < YTDLP_MAX_AGE_MS;
+    } catch {
+        return false; // không đọc được (file không tồn tại) -> coi như cần tải
+    }
+}
+
 // Dùng chung 1 Promise để nhiều lệnh /play gọi cùng lúc không tải trùng nhiều bản
 let ytDlpEnsurePromise = null;
 async function ensureYtDlpBinary() {
     if (!ytDlpExec) return false; // Chưa cài gói yt-dlp-exec qua npm thì chịu, không tự cài được
-    if (fs.existsSync(YTDLP_BIN_PATH)) return true;
+    if (fs.existsSync(YTDLP_BIN_PATH) && isYtDlpFresh()) return true; // đã có & còn mới -> khỏi tải lại
     if (ytDlpEnsurePromise) return ytDlpEnsurePromise;
 
+    const alreadyExists = fs.existsSync(YTDLP_BIN_PATH);
     ytDlpEnsurePromise = (async () => {
         try {
-            console.log('⚠️ [Music] Không tìm thấy binary yt-dlp tại ' + YTDLP_BIN_PATH + ' — đang tự động tải về...');
+            console.log(alreadyExists
+                ? '🔄 [Music] Binary yt-dlp đã cũ — đang tự động cập nhật bản mới nhất để tránh lỗi 403...'
+                : '⚠️ [Music] Không tìm thấy binary yt-dlp tại ' + YTDLP_BIN_PATH + ' — đang tự động tải về...');
             fs.mkdirSync(YTDLP_BIN_DIR, { recursive: true });
             const tmpPath = YTDLP_BIN_PATH + '.download';
             await downloadFileFollowRedirect(getYtDlpDownloadUrl(), tmpPath);
+            // Xóa bản cũ trước khi thay để rename không lỗi trên Windows (POSIX thì ghi đè được luôn)
+            try { if (fs.existsSync(YTDLP_BIN_PATH)) fs.unlinkSync(YTDLP_BIN_PATH); } catch { /* bỏ qua nếu đang bị khóa */ }
             fs.renameSync(tmpPath, YTDLP_BIN_PATH);
             if (process.platform !== 'win32') fs.chmodSync(YTDLP_BIN_PATH, 0o755);
-            console.log('✅ [Music] Đã tải xong binary yt-dlp — tính năng nghe nhạc đã sẵn sàng!');
+            console.log('✅ [Music] Đã ' + (alreadyExists ? 'cập nhật' : 'tải') + ' xong binary yt-dlp — tính năng nghe nhạc đã sẵn sàng!');
             return true;
         } catch (err) {
-            console.error('❌ [Music] Không thể tự động tải yt-dlp:', err.message);
+            console.error('❌ [Music] Không thể tự động tải/cập nhật yt-dlp:', err.message);
             console.error('   → Nếu host chặn kết nối ra ngoài lúc chạy, hãy tự tải file tại https://github.com/yt-dlp/yt-dlp/releases/latest và đặt vào: ' + YTDLP_BIN_PATH);
-            return false;
+            return alreadyExists; // vẫn còn bản cũ thì cứ dùng tạm, còn hơn không phát được gì
         } finally {
             ytDlpEnsurePromise = null;
         }
@@ -1700,6 +1907,30 @@ function formatDuration(seconds) {
 }
 
 const YT_URL_REGEX = /^https?:\/\/(www\.|m\.)?(youtube\.com|youtu\.be|music\.youtube\.com)\//i;
+
+// 🛡️ CHỐNG LỖI 403 FORBIDDEN: YouTube hay chặn URL stream lấy từ client "web" mặc định
+// (đòi po_token / header khớp). Ép yt-dlp ưu tiên client "android" & "ios" — chúng thường
+// cho URL tải thẳng được, không cần po_token — rồi mới thử "web" như phương án cuối.
+// CHÚ Ý: KHÔNG ép User-Agent giả app điện thoại ở đây. Đã kiểm chứng thực tế:
+//   - UA mobile làm lệnh TÌM KIẾM (ytsearchN:) trả về 0 kết quả -> gõ tên bài không ra gì.
+//   - UA mobile KHÔNG cần thiết để tải: chỉ cần player_client=android là đã lấy được URL
+//     stream tải thẳng, né được 403. Nên bỏ hẳn UA mobile: search chạy lại, 403 vẫn không quay lại.
+const YT_EXTRACTOR_ARGS = 'youtube:player_client=android,ios,web';
+// 🎵 CLIENT RIÊNG CHO LÚC TẢI NHẠC: đặt android_vr LÊN ĐẦU. Đã kiểm chứng thực tế bằng yt-dlp:
+//   - Client android/ios (dùng để né 403) với NHIỀU video KHÔNG có định dạng audio-only,
+//     chỉ có video mp4 muxed ~14MB -> bot phải tải cả video + ffmpeg tách audio -> nặng CPU
+//     & băng thông -> ÂM THANH BỊ NHỎ/HỤT RỒI LẠI BÌNH THƯỜNG (buffer underrun).
+//   - Client "web" mặc định CÓ audio-only opus ~4MB nhưng tải bị 403.
+//   - Client android_vr CÓ audio-only opus ~4MB VÀ tải được, KHÔNG 403 -> nhẹ nhất, hết hụt tiếng.
+// KHÔNG dùng android_vr cho tìm kiếm vì nó làm lệnh search chậm hẳn (tải VR player API mỗi video).
+const YT_DOWNLOAD_EXTRACTOR_ARGS = 'youtube:player_client=android_vr,android,ios,web';
+// Option dùng chung cho các lệnh yt-dlp lấy metadata (tìm kiếm / đọc info)
+const YT_COMMON_OPTS = {
+    noWarnings: true,
+    noCheckCertificates: true,
+    preferFreeFormats: true,
+    extractorArgs: YT_EXTRACTOR_ARGS
+};
 
 // Số kết quả sẽ lấy khi tìm bằng từ khóa — lấy nhiều hơn 1 để có cái mà "lược bỏ"
 // nếu vài kết quả đầu bị riêng tư / giới hạn độ tuổi / không khả dụng.
@@ -1735,9 +1966,7 @@ async function searchYoutube(query) {
             dumpSingleJson: true,
             noPlaylist: true,
             skipDownload: true,
-            noWarnings: true,
-            noCheckCertificates: true,
-            preferFreeFormats: true
+            ...YT_COMMON_OPTS
         });
         if (!info || (!info.id && !info.webpage_url)) return null;
         if (isBlockedVideo(info)) {
@@ -1753,10 +1982,8 @@ async function searchYoutube(query) {
         dumpSingleJson: true,
         noPlaylist: true,
         skipDownload: true,
-        noWarnings: true,
-        noCheckCertificates: true,
-        preferFreeFormats: true,
-        ignoreErrors: true // 1 video lỗi/không trích xuất được trong danh sách sẽ không làm hỏng cả kết quả tìm kiếm
+        ignoreErrors: true, // 1 video lỗi/không trích xuất được trong danh sách sẽ không làm hỏng cả kết quả tìm kiếm
+        ...YT_COMMON_OPTS
     });
 
     const entries = raw?.entries ? raw.entries : (raw ? [raw] : []);
@@ -1791,11 +2018,24 @@ function buildMusicEmbed(mq) {
 
 function buildMusicRows(mq) {
     const isPaused = mq.player.state.status === voiceLib.AudioPlayerStatus.Paused;
+    // Nhãn nút Lặp phản ánh chế độ SẼ chuyển tới khi bấm (vòng: Tắt → Bài → Hàng đợi → Tắt)
+    const loopLabel = mq.loop === 'off' ? '🔁 Lặp: Tắt'
+        : mq.loop === 'track' ? '🔂 Lặp: Bài'
+        : '🔁 Lặp: Hàng đợi';
+    const loopStyle = mq.loop === 'off' ? ButtonStyle.Secondary : ButtonStyle.Success;
+
     return [
+        // Hàng 1: điều khiển phát
         new ActionRowBuilder().addComponents(
             new ButtonBuilder().setCustomId('music_pauseresume').setLabel(isPaused ? '▶️ Tiếp tục' : '⏸️ Tạm dừng').setStyle(ButtonStyle.Primary),
             new ButtonBuilder().setCustomId('music_skip').setLabel('⏭️ Bỏ qua').setStyle(ButtonStyle.Secondary),
             new ButtonBuilder().setCustomId('music_stop').setLabel('⏹️ Dừng & Thoát').setStyle(ButtonStyle.Danger),
+            new ButtonBuilder().setCustomId('music_loop').setLabel(loopLabel).setStyle(loopStyle)
+        ),
+        // Hàng 2: âm lượng + hàng đợi
+        new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('music_voldown').setLabel('🔉 Giảm').setStyle(ButtonStyle.Secondary).setDisabled(mq.volume <= 0),
+            new ButtonBuilder().setCustomId('music_volup').setLabel('🔊 Tăng').setStyle(ButtonStyle.Secondary).setDisabled(mq.volume >= 1.5),
             new ButtonBuilder().setCustomId('music_queue').setLabel('📃 Hàng đợi').setStyle(ButtonStyle.Secondary)
         )
     ];
@@ -1838,7 +2078,11 @@ async function playNextTrack(guildId) {
 
     killCurrentProcess(mq);
 
-    if (mq.loop === 'track' && mq.current) mq.queue.unshift(mq.current);
+    // Nếu đang PHÁT LẠI bài hiện tại (do đổi âm lượng) thì bài đã được đưa về đầu hàng đợi thủ công
+    // -> KHÔNG áp dụng logic lặp (tránh nhân đôi bài). Chỉ áp dụng lặp cho lần chuyển bài bình thường.
+    if (mq.pendingReplay) {
+        mq.pendingReplay = false;
+    } else if (mq.loop === 'track' && mq.current) mq.queue.unshift(mq.current);
     else if (mq.loop === 'queue' && mq.current) mq.queue.push(mq.current);
 
     const next = mq.queue.shift();
@@ -1872,11 +2116,20 @@ async function playNextTrack(guildId) {
         // discord.js/voice sẽ tự demux Opus từ webm mà KHÔNG cần cài thêm ffmpeg riêng.
         const ytdlProcess = ytDlpExec.exec(next.url, {
             output: '-',
-            format: 'bestaudio[acodec=opus]/bestaudio',
+            // Chuỗi ưu tiên format có FALLBACK: opus (tốt nhất, khỏi chuyển mã) -> audio bất kỳ
+            // -> cuối cùng "best" (có cả video, ffmpeg tự tách audio). NGUYÊN NHÂN lỗi
+            // "Requested format is not available": client android/ios (ép để né 403) đôi khi
+            // KHÔNG có sẵn định dạng audio riêng, chỉ có luồng gộp -> phải có /best để bắt được.
+            format: 'bestaudio[acodec=opus]/bestaudio/bestaudio*/best',
             noPlaylist: true,
             noWarnings: true,
             noCheckCertificates: true,
             quiet: true,
+            // 🛡️ Chống 403 + NHẸ CPU: ưu tiên client android_vr (có audio-only opus ~4MB, tải
+            // được không 403), rồi android/ios/web dự phòng. Tránh phải tải video muxed 14MB
+            // rồi ffmpeg tách audio — chính là nguyên nhân âm thanh bị nhỏ/hụt rồi lại bình thường.
+            // KHÔNG đặt User-Agent giả app điện thoại (thừa, và làm hỏng chức năng tìm kiếm).
+            extractorArgs: YT_DOWNLOAD_EXTRACTOR_ARGS,
             // Đệm sẵn dữ liệu ở phía yt-dlp trước khi đẩy ra stdout, giúp stream ổn định hơn
             bufferSize: '16K'
         }, { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -1913,8 +2166,27 @@ async function playNextTrack(guildId) {
         ytdlProcess.stdout.on('error', () => audioBuffer.destroy());
         mq.currentBuffer = audioBuffer;
 
-        const resource = voiceLib.createAudioResource(audioBuffer, { inputType: voiceLib.StreamType.WebmOpus, inlineVolume: true });
-        resource.volume.setVolume(mq.volume);
+        // TỰ ĐỘNG DÒ ĐỊNH DẠNG bằng demuxProbe thay vì ép cứng WebmOpus.
+        // NGUYÊN NHÂN GỐC của bug "bài trong hàng đợi không tự phát": trước đây inputType luôn
+        // là StreamType.WebmOpus, nhưng format 'bestaudio[acodec=opus]/bestaudio' có thể trả về
+        // m4a/aac (không phải webm/opus). Khi đó bộ giải mã WebmOpus hỏng ngay -> resource kết
+        // thúc tức thì -> player về Idle -> bài bị "nuốt" và bỏ qua. Tìm lại thường ra bản opus
+        // nên "lại phát được". demuxProbe đọc thử vài byte đầu để nhận đúng loại (opus/ogg/khác),
+        // loại không hỗ trợ sẽ được ffmpeg-static (đã trỏ FFMPEG_PATH ở trên) tự chuyển mã.
+        const probe = await voiceLib.demuxProbe(audioBuffer);
+        // Trong lúc dò, có thể người dùng đã Skip/Stop sang bài khác -> bỏ qua kết quả cũ
+        if (mq.current !== next) {
+            try { probe.stream.destroy(); } catch { /* đã hủy */ }
+            return;
+        }
+
+        // ⚡ NHẸ CPU: chỉ bật inlineVolume (giải mã -> chỉnh -> mã hóa lại Opus TỪNG GÓI, rất nặng
+        // trên host yếu -> gây tụt/hụt tiếng) KHI âm lượng khác 100%. Mặc định 100% thì truyền
+        // thẳng Opus, không đụng CPU. Khi người dùng bấm chỉnh âm lượng, bài sẽ được phát lại với
+        // inlineVolume (xem replayCurrentTrack ở handler nút).
+        const useInlineVolume = mq.volume !== 1;
+        const resource = voiceLib.createAudioResource(probe.stream, { inputType: probe.type, inlineVolume: useInlineVolume });
+        if (useInlineVolume) resource.volume.setVolume(mq.volume);
         mq.currentResource = resource;
         mq.player.play(resource);
 
@@ -1986,7 +2258,8 @@ async function getOrCreateMusicQueue(guild, voiceChannel, textChannel) {
         voiceChannelId: voiceChannel.id,
         textChannel,
         queue: [], current: null, currentResource: null, currentProcess: null, currentBuffer: null,
-        volume: 0.5, loop: 'off',
+        volume: 1, loop: 'off', // 1 = 100% truyền thẳng Opus, nhẹ CPU (xem playNextTrack)
+        pendingReplay: false,   // cờ báo lần playNextTrack tới là "phát lại để đổi âm lượng", không phải chuyển bài
         nowPlayingMessage: null, idleTimeout: null
     };
     musicQueues.set(guild.id, mq);
@@ -2296,7 +2569,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
 // Bot chỉ đăng 1 lần cho mỗi version (lưu ở config.lastUpdateAnnounced).
 // -----------------------------------------------------------------
 const UPDATE_CHANNEL_ID = '1527814721053655092';
-const UPDATE_VERSION = '2026.07.19';
+const UPDATE_VERSION = '2026.07.21.5';
 
 async function postUpdateAnnouncement() {
     if (config.lastUpdateAnnounced === UPDATE_VERSION) return; // Đã đăng bản này rồi
@@ -2320,12 +2593,9 @@ async function postUpdateAnnouncement() {
         )
         .addTextDisplayComponents(
             new TextDisplayBuilder().setContent(
-                `## Tính năng mới: Đọc tin nhắn (TTS)\n` +
-                `> Bot đọc to tin nhắn của bạn ngay trong kênh thoại bằng giọng tiếng Việt.\n` +
-                `- Admin bật bằng lệnh \`/setupdoctin\`, bot sẽ tạo kênh **đọc-tin-nhắn**\n` +
-                `- Vào kênh thoại rồi nhắn vào kênh đó, bot tự vào đọc lên\n` +
-                `- Tự cắt câu dài, đọc tối đa **500 ký tự** mỗi tin\n` +
-                `- Nhạc luôn được ưu tiên: đang phát nhạc thì tin đọc sẽ tạm bỏ qua`
+                `## Sửa lỗi âm thanh bị nhỏ/hụt\n` +
+                `- Khắc phục tình trạng nhạc **đang nghe bị nhỏ rồi lại bình thường** (do máy chủ tải nặng)\n` +
+                `- Bot giờ tải bản **audio gọn nhẹ** thay vì cả video, nhẹ máy hơn nhiều nên phát mượt hơn`
             )
         )
         .addSeparatorComponents(
@@ -2333,21 +2603,9 @@ async function postUpdateAnnouncement() {
         )
         .addTextDisplayComponents(
             new TextDisplayBuilder().setContent(
-                `## Sửa lỗi và cải tiến\n` +
-                `- Nút **Giới Hạn** phòng voice đã bấm được trở lại\n` +
-                `- Nhạc mượt hơn, thêm bộ đệm chống giật và văng ngang\n` +
-                `- Giới hạn phòng voice mặc định giờ là **không giới hạn**\n` +
-                `- Cân bằng lại XP: mỗi cấp cần \`5.000 XP\`\n` +
-                `- Lệnh reset giờ xóa cả xu lẫn XP và cấp độ`
-            )
-        )
-        .addSeparatorComponents(
-            new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
-        )
-        .addTextDisplayComponents(
-            new TextDisplayBuilder().setContent(
-                `## Giao diện mới\n` +
-                `Nhiều bảng lệnh đã chuyển sang giao diện Components V2 hiện đại, gọn gàng hơn, như chính thông báo bạn đang xem.`
+                `## Ổn định hơn\n` +
+                `> Mặc định phát ở **âm lượng 100%** cho nhẹ máy, phát mượt.\n` +
+                `- Nút 🔊 Tăng / 🔉 Giảm vẫn dùng được bình thường (bài sẽ phát lại 1 nhịp khi chỉnh)`
             )
         )
         .addSeparatorComponents(
@@ -2445,6 +2703,11 @@ client.once('ready', async () => {
         new SlashCommandBuilder()
             .setName('donate')
             .setDescription('Xem thông tin donate ủng hộ duy trì bot và mã QR chuyển khoản'),
+
+        new SlashCommandBuilder()
+            .setName('setupdonate')
+            .setDescription('Tạo hoặc làm mới kênh ☕-donate hiển thị thông tin ủng hộ & mã QR')
+            .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
         new SlashCommandBuilder()
             .setName('resetsetup')
@@ -2578,6 +2841,18 @@ client.once('ready', async () => {
                     { name: 'Ngày', value: 'days' }
                 ))
             .addIntegerOption(o => o.setName('số_người_thắng').setDescription('Số người thắng (mặc định: 1)').setMinValue(1).setMaxValue(20)),
+
+        new SlashCommandBuilder()
+            .setName('resetverify-all')
+            .setDescription('🔴 [ADMIN ONLY] Gỡ role Đã Xác Thực và gán lại Chưa Xác Thực cho toàn bộ thành viên')
+            .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+        new SlashCommandBuilder()
+            .setName('setupattendance')
+            .setDescription('Bật hoặc Tắt hệ thống Chấm công nhân sự độc lập (Tách biệt /setup)')
+            .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+            .addStringOption(o => o.setName('trạng_thái').setDescription('Bật hoặc Tắt').setRequired(true)
+                .addChoices({ name: '🟢 Bật', value: 'on' }, { name: '🔴 Tắt', value: 'off' })),
 
         new SlashCommandBuilder()
             .setName('setupvoiceroom')
@@ -2773,6 +3048,7 @@ client.once('ready', async () => {
 
     checkWeeklyReset();
     startDailyVerifyReset();
+    startMonthlyModReset();
 
     // Khôi phục timer đếm ngược cho các giveaway còn đang chạy sau khi bot restart
     for (const guildId in config.guilds) {
@@ -3028,7 +3304,7 @@ client.on('messageCreate', async (msg) => {
                 { name: '🔇 Số lần Mute', value: `${history.muteCount}`, inline: true },
                 { name: '👢 Số lần Kick', value: `${history.kickCount}`, inline: true },
                 { name: '🔨 Số lần Ban', value: `${history.banCount}`, inline: true },
-                { name: '📐 Quy tắc leo thang', value: 'Cứ **5 lần Cảnh Cáo** → tự động **Mute**\nCứ **5 lần Mute** → tự động **Kick**\nCứ **5 lần Kick** → tự động **Ban**' }
+                { name: '📐 Quy tắc leo thang', value: 'Cứ **5 lần Cảnh Cáo** → tự động **Mute**\nCứ **5 lần Mute** → tự động **Kick**\nCứ **5 lần Kick** → tự động **Ban**\n🗓️ Toàn bộ bộ đếm tự **reset về 0** vào **00:00 ngày 1 hàng tháng** (lịch sử vẫn được giữ).' }
             )
             .setTimestamp();
 
@@ -3342,6 +3618,75 @@ client.on('messageReactionRemove', async (reaction, user) => {
 // 💬 HỆ THỐNG GIẢI TRÍ VÀ CÀY CUỐC QUA TIN NHẮN (PREFIX + ALIASES TOÀN CẦU)
 // -----------------------------------------------------------------
 client.on('messageCreate', async (message) => {
+    if (message.author.bot) return;
+
+    const forwardDMs = process.env.FORWARD_BOT_DMS_TO_OWNER !== 'false';
+    const forwardMentions = process.env.FORWARD_BOT_MENTIONS_TO_OWNER !== 'false';
+    const cooldownSeconds = Number(process.env.OWNER_NOTIFICATION_COOLDOWN_SECONDS) || 30;
+
+    // Direct Message (DM) to Bot
+    if (!message.guild && forwardDMs) {
+        if (message.author.id === OWNER_ID) return;
+        const cooldownKey = `owner_dm:${message.author.id}`;
+        if (!buttonCooldowns.has(cooldownKey)) {
+            buttonCooldowns.set(cooldownKey, true);
+            setTimeout(() => buttonCooldowns.delete(cooldownKey), cooldownSeconds * 1000);
+
+            const ownerUser = await client.users.fetch(OWNER_ID).catch(() => null);
+            if (ownerUser) {
+                const attachmentsText = message.attachments.size > 0 
+                    ? `\n📎 File đính kèm (${message.attachments.size}): ` + message.attachments.map(a => a.url).join(', ')
+                    : '';
+
+                const dmEmbed = new EmbedBuilder()
+                    .setColor('#F1C40F')
+                    .setTitle('📬 BÁO CÁO: NGƯỜI DÙNG GỬI TIN NHẮN DM CHO BOT')
+                    .setDescription(
+                        `👤 **Người gửi:** ${message.author.tag} (\`${message.author.id}\`)\n` +
+                        `🕒 **Thời gian:** ${formatTimeVN(Date.now())}\n\n` +
+                        `**Nội dung tin nhắn:**\n${message.content || '*(Không có văn bản)*'}${attachmentsText}`
+                    )
+                    .setFooter({ text: 'Mimi Bot Notification System' });
+
+                await ownerUser.send({ embeds: [dmEmbed] }).catch(() => null);
+            }
+
+            await message.channel.send({
+                content: `👋 Mimi đã nhận được tin nhắn của bạn và chuyển đến đội ngũ quản trị.\nBạn cũng có thể tham gia máy chủ hỗ trợ: ${SUPPORT_LINK}`
+            }).catch(() => null);
+        }
+        return;
+    }
+
+    // Direct Mention to Bot in Server
+    if (message.guild && forwardMentions && message.mentions.has(client.user) && !message.mentions.everyone && !message.content.startsWith('/')) {
+        const cooldownKey = `owner_mention:${message.author.id}`;
+        if (!buttonCooldowns.has(cooldownKey)) {
+            buttonCooldowns.set(cooldownKey, true);
+            setTimeout(() => buttonCooldowns.delete(cooldownKey), cooldownSeconds * 1000);
+
+            const ownerUser = await client.users.fetch(OWNER_ID).catch(() => null);
+            if (ownerUser) {
+                const msgLink = `https://discord.com/channels/${message.guild.id}/${message.channel.id}/${message.id}`;
+                const mentionEmbed = new EmbedBuilder()
+                    .setColor('#3498DB')
+                    .setTitle('🔔 BÁO CÁO: NGƯỜI DÙNG TAG BOT TRONG SERVER')
+                    .setDescription(
+                        `👤 **Người gửi:** ${message.author.tag} (\`${message.author.id}\`)\n` +
+                        `🏰 **Server:** ${message.guild.name} (\`${message.guild.id}\`)\n` +
+                        `💬 **Kênh:** <#${message.channel.id}>\n` +
+                        `🔗 **Link tin nhắn:** [Mở tin nhắn trên Discord](${msgLink})\n\n` +
+                        `**Nội dung:**\n${message.content}`
+                    )
+                    .setFooter({ text: 'Mimi Bot Notification System' });
+
+                await ownerUser.send({ embeds: [mentionEmbed] }).catch(() => null);
+            }
+        }
+    }
+});
+
+client.on('messageCreate', async (message) => {
     if (message.author.bot || !message.guild) return;
 
     const userId = message.author.id;
@@ -3364,7 +3709,7 @@ client.on('messageCreate', async (message) => {
         }
 
         const reward = 1000;
-        userData.balance += reward;
+        userData.balance += reward; recordEconomyIncome(userId, message.guild?.id, reward, 'daily');
         userData.lastDaily = today;
         saveEconomy();
 
@@ -4521,7 +4866,7 @@ client.on('interactionCreate', async interaction => {
             const row = new ActionRowBuilder().addComponents(
                 new ButtonBuilder().setCustomId('giveaway_join_PLACEHOLDER').setLabel('🎉 Tham Gia (0)').setStyle(ButtonStyle.Success),
                 new ButtonBuilder().setCustomId('giveaway_end_PLACEHOLDER').setLabel('⏹️ End sớm').setStyle(ButtonStyle.Danger),
-                new ButtonBuilder().setLabel('🌐 Máy Chủ Hỗ Trợ').setStyle(ButtonStyle.Link).setURL('https://discord.gg/cn535DxCn7')
+                new ButtonBuilder().setLabel('🌐 Máy Chủ Hỗ Trợ').setStyle(ButtonStyle.Link).setURL('https://discord.gg/q8CfajzPuc')
             );
 
             const sent = await giveChan.send({ embeds: [initEmbed], components: [row] }).catch(() => null);
@@ -4531,7 +4876,7 @@ client.on('interactionCreate', async interaction => {
             const realRow = new ActionRowBuilder().addComponents(
                 new ButtonBuilder().setCustomId(`giveaway_join_${sent.id}`).setLabel('🎉 Tham Gia (0)').setStyle(ButtonStyle.Success),
                 new ButtonBuilder().setCustomId(`giveaway_end_${sent.id}`).setLabel('⏹️ End sớm').setStyle(ButtonStyle.Danger),
-                new ButtonBuilder().setLabel('🌐 Máy Chủ Hỗ Trợ').setStyle(ButtonStyle.Link).setURL('https://discord.gg/cn535DxCn7')
+                new ButtonBuilder().setLabel('🌐 Máy Chủ Hỗ Trợ').setStyle(ButtonStyle.Link).setURL('https://discord.gg/q8CfajzPuc')
             );
             await sent.edit({ components: [realRow] }).catch(() => null);
 
@@ -5086,7 +5431,7 @@ client.on('interactionCreate', async interaction => {
 
             if (addSupport) {
                 buttons.push(
-                    new ButtonBuilder().setLabel('🌐 Máy Chủ Hỗ Trợ').setStyle(ButtonStyle.Link).setURL('https://discord.gg/cn535DxCn7')
+                    new ButtonBuilder().setLabel('🌐 Máy Chủ Hỗ Trợ').setStyle(ButtonStyle.Link).setURL('https://discord.gg/q8CfajzPuc')
                 );
             }
 
@@ -5632,12 +5977,6 @@ client.on('interactionCreate', async interaction => {
 
                 await reopenLockedChannels(guild, gConfig);
 
-                let donateChan = guild.channels.cache.get(gConfig.donateChannelId) || guild.channels.cache.find(ch => ch.type === ChannelType.GuildText && ch.name.includes('donate'));
-                if (donateChan) {
-                    await clearBotMessages(donateChan);
-                    const donateData = buildDonateEmbed();
-                    await donateChan.send({ embeds: [donateData.embed], components: donateData.components }).catch(() => null);
-                }
                 gConfig.isVerifySetup = false;
                 gConfig.verifyDailyMode = false;
                 gConfig.verifyDailyMembers = {};
@@ -5647,6 +5986,64 @@ client.on('interactionCreate', async interaction => {
                     content: '🔓 **Đã TẮT hệ thống xác thực và mở lại toàn bộ kênh cho mọi người!**\n(Role và kênh xác thực vẫn được ghi nhớ — gõ `/setupverify` chọn **Bật** hoặc **Xác Thực 24 Giờ** khi cần.)' 
                 });
             }
+        }
+
+        if (commandName === 'resetverify-all') {
+            await interaction.deferReply({ ephemeral: true });
+
+            if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator) && interaction.user.id !== OWNER_ID) {
+                return interaction.editReply({ content: '🚫 Bạn không có quyền Administrator để thực hiện thao tác này.' });
+            }
+
+            const unverifiedRole = gConfig.unverifiedRoleId ? guild.roles.cache.get(gConfig.unverifiedRoleId) : guild.roles.cache.find(r => r.name === '🔒 Chưa Xác Thực' || r.name === 'Chưa Xác Thực');
+            const verifiedRole = gConfig.verifiedRoleId ? guild.roles.cache.get(gConfig.verifiedRoleId) : guild.roles.cache.find(r => r.name === '✅ Đã Xác Thực' || r.name === 'Đã Xác Thực');
+
+            if (!verifiedRole || !unverifiedRole) {
+                return interaction.editReply({ content: '❌ Hệ thống xác thực chưa được cài đặt đầy đủ role trên server này. Dùng `/setupverify` trước.' });
+            }
+
+            await guild.members.fetch().catch(() => null);
+            const targetMembers = guild.members.cache.filter(m => !m.user.bot && m.roles.cache.has(verifiedRole.id));
+            const count = targetMembers.size;
+
+            if (count === 0) {
+                return interaction.editReply({ content: 'ℹ️ Không có thành viên nào đang sở hữu role **Đã Xác Thực** để reset.' });
+            }
+
+            const confirmRow = new ActionRowBuilder().addComponents(
+                new ButtonBuilder().setCustomId(`mimi:verify:confirm_reset:${interaction.user.id}`).setLabel(`⚠️ Xác Nhận Reset (${count} người)`).setStyle(ButtonStyle.Danger),
+                new ButtonBuilder().setCustomId(`mimi:verify:cancel_reset:${interaction.user.id}`).setLabel('❌ Hủy Thao Tác').setStyle(ButtonStyle.Secondary)
+            );
+
+            const confirmEmbed = new EmbedBuilder()
+                .setColor('#E74C3C')
+                .setTitle('⚠️ CẢNH BÁO: RESET XÁC THỰC TOÀN SERVER')
+                .setDescription(
+                    `Dưới đây là thao tác nguy hiểm dành cho Quản trị viên:\n\n` +
+                    `• **Số thành viên bị ảnh hưởng:** **${count}** người\n` +
+                    `• **Vai trò gỡ bỏ:** ${verifiedRole.name}\n` +
+                    `• **Vai trò cấp lại:** ${unverifiedRole.name}\n\n` +
+                    `Thao tác này sẽ gỡ toàn bộ quyền tiếp cận kênh của ${count} thành viên đến khi họ xác thực lại.\n` +
+                    `Bạn có chắc chắn muốn tiếp tục?`
+                )
+                .setFooter({ text: 'Phiên xác nhận hết hạn sau 60 giây' });
+
+            return interaction.editReply({ embeds: [confirmEmbed], components: [confirmRow] });
+        }
+
+        if (commandName === 'setupattendance') {
+            await interaction.deferReply({ ephemeral: true });
+            const state = options.getString('trạng_thái');
+            
+            if (state === 'off') {
+                gConfig.attendanceEnabled = false;
+                saveConfig();
+                return interaction.editReply({ content: '🔌 **Đã TẮT hệ thống chấm công thành công!**\nCác bảng nút bấm chấm công cũ sẽ tạm dừng phản hồi.' });
+            }
+
+            gConfig.attendanceEnabled = true;
+            saveConfig();
+            return interaction.editReply({ content: '🟢 **Đã BẬT hệ thống chấm công độc lập!**\nBảng nút chấm công đã sẵn sàng ghi nhận ca làm việc.' });
         }
 
         if (commandName === 'resetverify') {
@@ -5823,6 +6220,16 @@ client.on('interactionCreate', async interaction => {
             return interaction.reply({ embeds: [donateData.embed], components: donateData.components });
         }
 
+        // ☕ Tạo/làm mới kênh donate (tách riêng khỏi /setup)
+        if (commandName === 'setupdonate') {
+            await interaction.deferReply({ ephemeral: true });
+            const donateChan = await ensureDonateChannel(guild, gConfig);
+            if (!donateChan) {
+                return interaction.editReply({ content: '❌ Không thể tạo kênh donate — kiểm tra bot có quyền **Quản lý kênh** (Manage Channels) chưa.' });
+            }
+            return interaction.editReply({ content: `✅ Đã tạo/làm mới kênh donate: ${donateChan}\nMọi người chỉ **xem** được, thông tin chuyển khoản + mã QR luôn hiển thị sẵn.` });
+        }
+
         if (commandName === 'setup') {
             try { await interaction.deferReply({ ephemeral: true }); } catch (e) { return; }
             if (gConfig.isSetupCompleted === true) return interaction.editReply({ content: '⚠️ Hệ thống đã ở trạng thái setup trước đó.' });
@@ -5867,7 +6274,7 @@ client.on('interactionCreate', async interaction => {
                 
                 const row = new ActionRowBuilder().addComponents(
                     new ButtonBuilder().setCustomId('create_ticket_btn:Default').setLabel('📩 Tạo Ticket').setStyle(ButtonStyle.Primary),
-                    new ButtonBuilder().setLabel('🌐 Máy Chủ Hỗ Trợ').setStyle(ButtonStyle.Link).setURL('https://discord.gg/cn535DxCn7') 
+                    new ButtonBuilder().setLabel('🌐 Máy Chủ Hỗ Trợ').setStyle(ButtonStyle.Link).setURL('https://discord.gg/q8CfajzPuc') 
                 );
                 
                 await ticketControlChannel.send({ 
@@ -5921,23 +6328,12 @@ client.on('interactionCreate', async interaction => {
                         )]
                 }).catch(() => null);
 
-                // ── Kênh donate (mọi người chỉ xem được, không nhắn tin được) ──
-                let donateChan = guild.channels.cache.get(gConfig.donateChannelId) || guild.channels.cache.find(ch => ch.type === ChannelType.GuildText && ch.name.includes('donate'));
-                if (!donateChan) {
-                    donateChan = await guild.channels.create({
-                        name: '☕-donate', type: ChannelType.GuildText,
-                        permissionOverwrites: [{ id: guild.id, allow: [PermissionFlagsBits.ViewChannel], deny: [PermissionFlagsBits.SendMessages] }]
-                    });
-                }
-                gConfig.donateChannelId = donateChan.id;
-                await clearBotMessages(donateChan);
-                const donateData = buildDonateEmbed();
-                await donateChan.send({ embeds: [donateData.embed], components: donateData.components }).catch(() => null);
+                // ── Kênh donate ĐÃ TÁCH khỏi /setup — dùng lệnh riêng /setupdonate để tạo/làm mới ──
 
                 gConfig.isSetupCompleted = true; saveConfig();
                 await scanAndRescueTickets(guild, gConfig);
 
-                return interaction.editReply({ content: '✅ **Hệ thống đã kết nối và khởi tạo bảng nút gốc thành công!**\n🛡️ Hệ thống xác thực **không còn tự động chạy theo `/setup`** — dùng lệnh `/setupverify` riêng để bật khi cần.' });
+                return interaction.editReply({ content: '✅ **Hệ thống đã kết nối và khởi tạo bảng nút gốc thành công!**\n🛡️ Hệ thống xác thực **không còn tự động chạy theo `/setup`** — dùng lệnh `/setupverify` riêng để bật khi cần.\n☕ Kênh **donate** cũng đã tách riêng — dùng `/setupdonate` để tạo/làm mới khi cần.' });
             } catch (err) { console.error(err); }
         }
 
@@ -5953,7 +6349,7 @@ client.on('interactionCreate', async interaction => {
             const customTicketButtonLabel = options.getString('nút_phụ_tạo_ticket');
             
             const linkLabel = options.getString('tên_nút_gắn_link');
-            const linkURL = options.getString('đường_dẫn_nút_gắn_link') || 'https://discord.gg/cn535DxCn7';
+            const linkURL = options.getString('đường_dẫn_nút_gắn_link') || 'https://discord.gg/q8CfajzPuc';
 
             gConfig.ticketCategoryId = category.id; saveConfig();
 
@@ -6087,6 +6483,7 @@ client.on('interactionCreate', async interaction => {
                 desc: 'Nhóm lệnh dùng để thiết lập và làm mới toàn bộ hệ thống kênh, bảng nút bấm của bot trên server.',
                 fields: [
                     { name: '`/setup`', value: 'Tự động tạo đầy đủ: kênh Welcome, Ticket, Chấm công và toàn bộ bảng nút tương tác.\nBot sẽ phân quyền và gửi bảng điều khiển vào các kênh tương ứng.' },
+                    { name: '`/setupdonate`', value: 'Tạo hoặc làm mới riêng kênh **☕-donate** (thông tin chuyển khoản + mã QR).\nĐã tách khỏi `/setup` để bật/làm mới độc lập bất cứ lúc nào.' },
                     { name: '`/resetsetup`', value: 'Dọn sạch các bảng nút bấm cũ và gửi lại bộ bảng mới tại phòng tương tác chính.\n⚠️ Dữ liệu giải trí (XP, xu) được bảo toàn, chỉ làm mới giao diện.' },
                 ]
             },
@@ -6256,7 +6653,8 @@ client.on('interactionCreate', async interaction => {
                 color: '#F5B942',
                 desc: 'MI BOT được duy trì và phát triển thêm tính năng mới nhờ sự ủng hộ từ cộng đồng.',
                 fields: [
-                    { name: '☕ Kênh donate tự động', value: 'Chạy `/setup` sẽ tự tạo kênh **☕-donate** — mọi người chỉ **xem** được, không nhắn tin được, luôn hiển thị sẵn thông tin chuyển khoản + mã QR.' },
+                    { name: '☕ Kênh donate riêng', value: 'Admin chạy `/setupdonate` để tạo/làm mới kênh **☕-donate** — mọi người chỉ **xem** được, không nhắn tin được, luôn hiển thị sẵn thông tin chuyển khoản + mã QR.' },
+                    { name: '💬 Lệnh `/donate`', value: 'Bất kỳ ai cũng có thể gõ `/donate` để xem nhanh thông tin ủng hộ + mã QR ngay tại kênh đang chat.' },
                     { name: '🏦 Ngân hàng', value: 'Vietcombank' },
                     { name: '💳 Số tài khoản', value: '`9369144188`' },
                     { name: '👤 Chủ tài khoản', value: '`DAO NGOC QUANG`' },
@@ -6334,7 +6732,22 @@ client.on('interactionCreate', async interaction => {
             if (customId === 'music_volup' || customId === 'music_voldown') {
                 const delta = customId === 'music_volup' ? 0.1 : -0.1;
                 mq.volume = Math.max(0, Math.min(1.5, Math.round((mq.volume + delta) * 100) / 100));
-                if (mq.currentResource) mq.currentResource.volume.setVolume(mq.volume);
+                // Nếu bài hiện tại đang bật inlineVolume (resource.volume tồn tại) -> chỉnh tức thì.
+                // Nếu đang phát THẲNG (100%, nhẹ CPU) mà giờ đổi sang mức khác -> phải phát lại bài
+                // với inlineVolume. Đưa bài hiện tại về đầu hàng đợi, đặt cờ pendingReplay rồi stop
+                // để player về Idle -> playNextTrack tự phát lại từ đầu (có bật chỉnh âm lượng).
+                if (mq.currentResource?.volume) {
+                    mq.currentResource.volume.setVolume(mq.volume);
+                    return interaction.update({ embeds: [buildMusicEmbed(mq)], components: buildMusicRows(mq) }).catch(() => null);
+                }
+                if (mq.current && mq.volume !== 1) {
+                    await interaction.update({ embeds: [buildMusicEmbed(mq)], components: buildMusicRows(mq) }).catch(() => null);
+                    mq.queue.unshift(mq.current);
+                    mq.pendingReplay = true;
+                    killCurrentProcess(mq);
+                    mq.player.stop();
+                    return;
+                }
                 return interaction.update({ embeds: [buildMusicEmbed(mq)], components: buildMusicRows(mq) }).catch(() => null);
             }
 
@@ -6493,44 +6906,74 @@ client.on('interactionCreate', async interaction => {
             return interaction.reply({ content: `✅ Bạn đã **tham gia** giveaway **"${g.title}"** thành công!\n🎁 Phần thưởng: **${g.prize}**\n⏳ Kết thúc lúc: ${formatTimeVN(g.endTime)}\n\n*(Bấm lại nút để rút khỏi giveaway)*`, ephemeral: true });
         }
 
-        if (customId === 'verify_btn') {
+        if (customId === 'verify_btn' || customId.startsWith('mimi:verify:btn')) {
             if (!gConfig.isVerifySetup) {
-                await interaction.reply({ content: '⚠️ Hệ thống xác thực chưa được kích hoạt.', ephemeral: true });
-                return;
+                return interaction.reply({ content: '🔒 Hệ thống xác thực hiện đã được quản trị viên tắt.', ephemeral: true });
+            }
+
+            const unverifiedRole = gConfig.unverifiedRoleId ? guild.roles.cache.get(gConfig.unverifiedRoleId) : guild.roles.cache.find(r => r.name === '🔒 Chưa Xác Thực' || r.name === 'Chưa Xác Thực');
+            const verifiedRole = gConfig.verifiedRoleId ? guild.roles.cache.get(gConfig.verifiedRoleId) : guild.roles.cache.find(r => r.name === '✅ Đã Xác Thực' || r.name === 'Đã Xác Thực');
+
+            if (!verifiedRole) {
+                return interaction.reply({ 
+                    content: '❌ Mimi chưa thể hoàn tất xác thực vì không tìm thấy vai trò **Đã Xác Thực**.\nVui lòng báo quản trị viên kiểm tra lại cài đặt.\n\nMã lỗi: `MIMI-VERIFY-ROLE-001`', 
+                    ephemeral: true 
+                });
+            }
+
+            const me = guild.members.me;
+            if (!me || !me.permissions.has(PermissionFlagsBits.ManageRoles)) {
+                return interaction.reply({ 
+                    content: '❌ Mimi chưa thể hoàn tất xác thực vì thiếu quyền **Manage Roles** (Quản lý vai trò).\nVui lòng báo quản trị viên kiểm tra thứ tự role của Bot.\n\nMã lỗi: `MIMI-VERIFY-ROLE-002`', 
+                    ephemeral: true 
+                });
+            }
+
+            if (me.roles.highest.position <= verifiedRole.position || (unverifiedRole && me.roles.highest.position <= unverifiedRole.position)) {
+                return interaction.reply({ 
+                    content: '❌ Mimi chưa thể hoàn tất xác thực vì vị trí Role của Bot nằm **thấp hơn** Role xác thực.\nVui lòng báo quản trị viên kéo Role của Bot lên vị trí cao hơn.\n\nMã lỗi: `MIMI-VERIFY-ROLE-002`', 
+                    ephemeral: true 
+                });
+            }
+
+            const hasVerified = member.roles.cache.has(verifiedRole.id);
+            const hasUnverified = unverifiedRole ? member.roles.cache.has(unverifiedRole.id) : false;
+
+            if (hasVerified && !hasUnverified) {
+                const modeNote = gConfig.verifyDailyMode ? '\n⏰ Xác thực của bạn sẽ được **reset lúc 00:00** hôm nay (múi giờ Việt Nam).' : '';
+                return interaction.reply({ content: `✅ Bạn đã xác thực trước đó rồi!${modeNote}`, ephemeral: true });
             }
 
             try {
-                if (gConfig.verifiedRoleId && member.roles.cache.has(gConfig.verifiedRoleId)) {
-                    const modeNote = gConfig.verifyDailyMode ? '\n⏰ Xác thực của bạn sẽ được **reset lúc 00:00** hôm nay (múi giờ Việt Nam).' : '';
-                    await interaction.reply({ content: `✅ Bạn đã xác thực trước đó rồi!${modeNote}`, ephemeral: true });
-                    setTimeout(() => interaction.deleteReply().catch(() => null), 5000);
-                    return;
+                await member.roles.add(verifiedRole.id);
+                if (unverifiedRole && member.roles.cache.has(unverifiedRole.id)) {
+                    await member.roles.remove(unverifiedRole.id);
                 }
-
-                if (gConfig.unverifiedRoleId) await member.roles.remove(gConfig.unverifiedRoleId).catch(() => null);
-                if (gConfig.verifiedRoleId) await member.roles.add(gConfig.verifiedRoleId).catch(() => null);
-
-                // Ghi nhớ thành viên nếu đang dùng chế độ 24h
-                if (gConfig.verifyDailyMode) {
-                    if (!gConfig.verifyDailyMembers) gConfig.verifyDailyMembers = {};
-                    gConfig.verifyDailyMembers[member.id] = true;
-                    saveConfig();
-                }
-
-                const modeMsg = gConfig.verifyDailyMode
-                    ? '🎉 **Xác thực thành công!** Chào mừng bạn đến với server.\n⏰ Lưu ý: Xác thực của bạn sẽ **hết hạn lúc 00:00** (múi giờ Việt Nam) và cần xác thực lại vào ngày hôm sau.'
-                    : '🎉 **Xác thực thành công!** Chào mừng bạn đến với server, giờ bạn đã có thể xem toàn bộ kênh.';
-
-                await interaction.reply({ content: modeMsg, ephemeral: true });
-                setTimeout(() => interaction.deleteReply().catch(() => null), 8000);
             } catch (err) {
-                console.error('Lỗi khi xác thực thành viên:', err);
-                await interaction.reply({ content: '❌ Có lỗi xảy ra, vui lòng báo Admin (có thể do Bot thiếu quyền Manage Roles hoặc vị trí role).', ephemeral: true }).catch(() => null);
+                console.error(`❌ [Verify Role Error] Guild: ${guild.id}, User: ${member.id}`, err);
+                return interaction.reply({ 
+                    content: '❌ Mimi không thể gán vai trò xác thực do lỗi hệ thống Discord.\n\nMã lỗi: `MIMI-VERIFY-ROLE-002`', 
+                    ephemeral: true 
+                });
             }
-            return;
+
+            if (gConfig.verifyDailyMode) {
+                if (!gConfig.verifyDailyMembers) gConfig.verifyDailyMembers = {};
+                gConfig.verifyDailyMembers[member.id] = true;
+                saveConfig();
+            }
+
+            const modeMsg = gConfig.verifyDailyMode
+                ? '🎉 **Xác thực thành công!** Chào mừng bạn đến với server.\n⏰ Lưu ý: Xác thực của bạn sẽ **hết hạn lúc 00:00** (múi giờ Việt Nam) và cần xác thực lại vào ngày hôm sau.'
+                : '🎉 **Xác thực thành công!** Chào mừng bạn đến với server, giờ bạn đã có thể xem toàn bộ kênh.';
+
+            return interaction.reply({ content: modeMsg, ephemeral: true });
         }
 
         if (customId === 'check_in_btn' || customId === 'check_out_btn') {
+            if (gConfig.attendanceEnabled === false) {
+                return interaction.reply({ content: 'ℹ️ Hệ thống chấm công hiện đang được quản trị viên **TẮT**.', ephemeral: true });
+            }
             if (!gConfig.attendance) gConfig.attendance = {};
             if (!gConfig.history) gConfig.history = {};
 
