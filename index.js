@@ -10,6 +10,7 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const { PassThrough, Readable } = require('stream');
+const { spawn } = require('child_process');
 const { colors, buildBaseEmbed, generateProgressBar } = require('./uiBuilder');
 const { startInternalApi } = require('./internalApi');
 const { MusicStore } = require('./musicStore');
@@ -2040,6 +2041,56 @@ async function searchYoutube(query) {
 // Ảnh dự phòng khi bài hát không có thumbnail (ThumbnailBuilder yêu cầu URL hợp lệ, null sẽ lỗi)
 const MUSIC_FALLBACK_THUMB = 'https://i.imgur.com/OaJ8Yqp.png';
 
+// =====================================================================
+// 🎚️ 8 HIỆU ỨNG ÂM THANH — bộ lọc ffmpeg (dùng khi phát qua đường ffmpeg)
+// ---------------------------------------------------------------------
+// Mỗi hiệu ứng là 1 chuỗi filter `-af` của ffmpeg. 'none' = không lọc (phát gốc).
+// Các hiệu ứng đổi tốc độ (nightcore/vaporwave/sped) làm thời lượng thực thay đổi,
+// nên thanh tiến trình có thể lệch nhẹ — chấp nhận được.
+// =====================================================================
+const AUDIO_EFFECTS = {
+    none:      { label: 'Tắt',            af: null },
+    bassboost: { label: 'Bassboost',      af: 'bass=g=15,dynaudnorm=f=200' },
+    nightcore: { label: 'Nightcore',      af: 'asetrate=48000*1.25,aresample=48000,atempo=1.0' },
+    lofi:      { label: 'Chill (Lofi)',   af: 'atempo=0.9,bass=g=5,treble=g=-3,aresample=48000' },
+    vaporwave: { label: 'Vaporwave',      af: 'asetrate=48000*0.85,aresample=48000,atempo=1.0' },
+    eightd:    { label: '8D Audio',       af: 'apulsator=hz=0.09' },
+    soft:      { label: 'Soft / Warm',    af: 'treble=g=-4,bass=g=4,dynaudnorm=f=150' },
+    tremolo:   { label: 'Tremolo',        af: 'tremolo=f=5:d=0.7' },
+    sped:      { label: 'Sped 1.5x',      af: 'atempo=1.5' }
+};
+
+// Đường dẫn ffmpeg (đã trỏ FFMPEG_PATH vào ffmpeg-static ở phần TTS phía trên).
+function getFfmpegPath() {
+    return process.env.FFMPEG_PATH || 'ffmpeg';
+}
+
+// Tạo tiến trình ffmpeg đọc audio từ 1 stream đầu vào (stdout của yt-dlp), rồi:
+//   • Tua tới giây `seekSec` (dùng cho khôi phục phiên & lệnh /sek)
+//   • Áp bộ lọc hiệu ứng `effectKey` (nếu khác 'none')
+//   • Xuất PCM s16le 48kHz stereo ra stdout để @discordjs/voice phát (StreamType.Raw)
+// Trả về tiến trình ffmpeg (có .stdout là luồng PCM). Ném lỗi nếu spawn thất bại.
+function spawnFfmpegAudio(inputStream, { seekSec = 0, effectKey = 'none' } = {}) {
+    const args = [];
+    if (seekSec > 0) args.push('-ss', String(seekSec)); // tua tới giây yêu cầu (đọc & bỏ phần đầu)
+    args.push('-i', 'pipe:0');
+    const effect = AUDIO_EFFECTS[effectKey];
+    if (effect && effect.af) args.push('-af', effect.af);
+    args.push(
+        '-f', 's16le',        // PCM 16-bit little-endian
+        '-ar', '48000',       // 48kHz — chuẩn của Discord voice
+        '-ac', '2',           // stereo
+        '-loglevel', 'error',
+        'pipe:1'
+    );
+    const ff = spawn(getFfmpegPath(), args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    // Bơm dữ liệu từ yt-dlp vào ffmpeg; nuốt lỗi EPIPE khi ffmpeg đóng sớm (skip/stop)
+    inputStream.pipe(ff.stdin);
+    inputStream.on('error', () => { try { ff.stdin.destroy(); } catch { /* bỏ qua */ } });
+    ff.stdin.on('error', () => { /* EPIPE khi ffmpeg thoát trước — bỏ qua an toàn */ });
+    return ff;
+}
+
 // Hàng nút điều khiển nhạc (Components V2 — KHÔNG dùng emoji cho gọn/đẹp theo yêu cầu).
 // customId nhúng ownerId của người mở panel để phần xử lý nút biết ai được phép thao tác.
 function buildMusicRows(mq) {
@@ -2071,7 +2122,10 @@ function buildMusicRows(mq) {
 // Gộp cả thông tin bài hát + thanh tiến trình + nút điều khiển vào 1 container.
 function buildMusicContainer(mq) {
     const track = mq.current;
-    const currentSecs = mq.currentResource ? Math.floor(mq.currentResource.playbackDuration / 1000) : 0;
+    // Cộng seekBase: playbackDuration chỉ đếm thời gian resource HIỆN TẠI đã phát; khi tua (seek/khôi phục)
+    // phải cộng số giây đã bỏ qua ở đầu để thanh tiến trình hiển thị đúng vị trí thật.
+    const played = mq.currentResource ? Math.floor(mq.currentResource.playbackDuration / 1000) : 0;
+    const currentSecs = (mq.seekBase || 0) + played;
     const totalSecs = track.duration || 0;
     const progressStr = `\`${formatDuration(currentSecs)}\` ${generateProgressBar(currentSecs, totalSecs)} \`${formatDuration(totalSecs)}\``;
     const loopText = mq.loop === 'track' ? 'Bài hiện tại' : mq.loop === 'queue' ? 'Cả hàng đợi' : 'Tắt';
@@ -2308,6 +2362,11 @@ function killCurrentProcess(mq) {
         try { mq.currentProcess.kill('SIGKILL'); } catch { /* đã thoát rồi thì bỏ qua */ }
     }
     mq.currentProcess = null;
+    // Kill tiến trình ffmpeg (nếu bài đang phát qua đường seek/hiệu ứng)
+    if (mq?.currentFfmpeg && !mq.currentFfmpeg.killed) {
+        try { mq.currentFfmpeg.kill('SIGKILL'); } catch { /* đã thoát rồi thì bỏ qua */ }
+    }
+    mq.currentFfmpeg = null;
     // Hủy bộ đệm PassThrough của bài cũ (nếu có) để giải phóng bộ nhớ ngay
     if (mq?.currentBuffer) {
         try { mq.currentBuffer.destroy(); } catch { /* đã hủy rồi thì bỏ qua */ }
@@ -2317,26 +2376,123 @@ function killCurrentProcess(mq) {
     stopProgressUpdater(mq);
 }
 
+// -----------------------------------------------------------------
+// 💾 SESSION-RESTORE — lưu/khôi phục phiên phát khi bot khởi động lại
+// -----------------------------------------------------------------
+// Tính vị trí đang phát (giây) của server: giây đã tua + thời gian resource đã phát.
+function getPlaybackSec(mq) {
+    if (!mq) return 0;
+    const played = mq.currentResource ? (mq.currentResource.playbackDuration || 0) / 1000 : 0;
+    return Math.max(0, Math.floor((mq.seekBase || 0) + played));
+}
+
+// Ghi ảnh chụp phiên phát của 1 server xuống đĩa (gọi mỗi lần chuyển bài / thay đổi trạng thái).
+// Chỉ lưu khi thực sự đang có bài phát để tránh khôi phục phiên rỗng.
+function persistSession(guildId) {
+    try {
+        const mq = musicQueues.get(guildId);
+        if (!mq || !mq.current || !mq.voiceChannelId) { musicStore.clearSession(guildId); return; }
+        musicStore.saveSession(guildId, {
+            voiceChannelId: mq.voiceChannelId,
+            textChannelId: mq.textChannel?.id || null,
+            current: MusicStore.normalizeTrack(mq.current),
+            queue: (mq.queue || []).map(MusicStore.normalizeTrack).filter(Boolean),
+            loop: mq.loop || 'off',
+            volume: mq.volume ?? 1,
+            positionSec: getPlaybackSec(mq),
+            ownerId: mq.ownerId || null,
+            autoplay: !!mq.autoplay,
+            stay247: !!mq.stay247,
+            effect: mq.effect || 'none'
+        });
+    } catch (e) {
+        console.error(`⚠️ [Music] persistSession lỗi ở server ${guildId}:`, e.message);
+    }
+}
+
+// Khôi phục các phiên phát đã lưu sau khi bot khởi động lại: vào lại kênh thoại,
+// dựng lại hàng đợi và phát tiếp bài đang dở từ đúng vị trí (seek qua ffmpeg).
+async function restoreMusicSessions() {
+    const sessions = musicStore.getAllSessions();
+    const guildIds = Object.keys(sessions || {});
+    if (guildIds.length === 0) return;
+    console.log(`🔄 [Music] Khôi phục ${guildIds.length} phiên phát đã lưu...`);
+    for (const guildId of guildIds) {
+        const s = sessions[guildId];
+        try {
+            const guild = client.guilds.cache.get(guildId);
+            if (!guild || !s || !s.current || !s.voiceChannelId) { musicStore.clearSession(guildId); continue; }
+            const voiceChannel = guild.channels.cache.get(s.voiceChannelId);
+            if (!voiceChannel || !voiceChannel.isVoiceBased?.()) { musicStore.clearSession(guildId); continue; }
+
+            const textChannel = s.textChannelId ? guild.channels.cache.get(s.textChannelId) : null;
+            const result = await getOrCreateMusicQueue(guild, voiceChannel, textChannel || voiceChannel);
+            if (!result || result.error || !result.mq) { musicStore.clearSession(guildId); continue; }
+
+            const mq = result.mq;
+            mq.queue = (s.queue || []).map(MusicStore.normalizeTrack).filter(Boolean);
+            mq.current = MusicStore.normalizeTrack(s.current);
+            mq.loop = s.loop || 'off';
+            mq.volume = typeof s.volume === 'number' ? s.volume : 1;
+            mq.ownerId = s.ownerId || null;
+            mq.autoplay = !!s.autoplay;
+            mq.stay247 = !!s.stay247;
+            mq.effect = s.effect || 'none';
+
+            // Phát lại bài đang dở từ đúng vị trí đã lưu (tua qua ffmpeg).
+            await playNextTrack(guildId, {
+                replayCurrent: true,
+                seekSec: Math.max(0, Math.floor(s.positionSec || 0)),
+                effectKey: mq.effect
+            });
+            if (mq.textChannel) {
+                mq.textChannel.send(buildMusicNoticePayload(
+                    'Khôi phục phiên phát',
+                    `Bot vừa khởi động lại và **tiếp tục phát** từ chỗ đang dở.\n> ${mq.current?.title || 'bài đang phát'}`,
+                    0x57F287
+                )).catch(() => null);
+            }
+        } catch (e) {
+            console.error(`⚠️ [Music] Khôi phục phiên ${guildId} lỗi:`, e.message);
+            musicStore.clearSession(guildId);
+        }
+    }
+}
+
 // Phát bài tiếp theo trong hàng đợi (tự động gọi khi player Idle hoặc khi bắt đầu /play)
-async function playNextTrack(guildId) {
+// opts:
+//   • seekSec  — bắt đầu phát từ giây này (khôi phục phiên / lệnh /sek). >0 -> đi qua ffmpeg.
+//   • effectKey — khóa hiệu ứng trong AUDIO_EFFECTS ('none' = không lọc). khác 'none' -> đi qua ffmpeg.
+//   • replayCurrent — phát LẠI mq.current thay vì lấy bài kế (dùng cho seek / đổi hiệu ứng giữa bài).
+async function playNextTrack(guildId, opts = {}) {
     const mq = musicQueues.get(guildId);
     if (!mq) return;
 
+    const seekSec = Math.max(0, Math.floor(opts.seekSec || 0));
+    const effectKey = opts.effectKey || mq.effect || 'none';
+
     killCurrentProcess(mq);
 
-    // Nếu đang PHÁT LẠI bài hiện tại (do đổi âm lượng) thì bài đã được đưa về đầu hàng đợi thủ công
-    // -> KHÔNG áp dụng logic lặp (tránh nhân đôi bài). Chỉ áp dụng lặp cho lần chuyển bài bình thường.
-    if (mq.pendingReplay) {
-        mq.pendingReplay = false;
-    } else if (mq.loop === 'track' && mq.current) mq.queue.unshift(mq.current);
-    else if (mq.loop === 'queue' && mq.current) mq.queue.push(mq.current);
+    let next;
+    if (opts.replayCurrent && mq.current) {
+        // Phát lại chính bài hiện tại (seek / đổi hiệu ứng) — KHÔNG đụng hàng đợi, KHÔNG áp lặp.
+        next = mq.current;
+    } else {
+        // Nếu đang PHÁT LẠI bài hiện tại (do đổi âm lượng) thì bài đã được đưa về đầu hàng đợi thủ công
+        // -> KHÔNG áp dụng logic lặp (tránh nhân đôi bài). Chỉ áp dụng lặp cho lần chuyển bài bình thường.
+        if (mq.pendingReplay) {
+            mq.pendingReplay = false;
+        } else if (mq.loop === 'track' && mq.current) mq.queue.unshift(mq.current);
+        else if (mq.loop === 'queue' && mq.current) mq.queue.push(mq.current);
 
-    const next = mq.queue.shift();
+        next = mq.queue.shift();
+    }
 
     if (!next) {
         // Vô hiệu hóa nút ở tin "Đang phát" cũ (V2: thay bằng container thông báo không nút)
         mq.current = null;
         mq.currentResource = null;
+        musicStore.clearSession(guildId); // hết bài -> không còn gì để khôi phục sau restart
         const endPayload = buildMusicNoticePayload('Hàng đợi đã hết', 'Bot sẽ rời kênh thoại sau **2 phút** nếu không có bài mới.', 0x99AAB5);
         if (mq.nowPlayingMessage) {
             const ok = await mq.nowPlayingMessage.edit(endPayload).catch(() => null);
@@ -2346,9 +2502,11 @@ async function playNextTrack(guildId) {
         }
         mq.idleTimeout = setTimeout(() => {
             const m = musicQueues.get(guildId);
-            if (m && !m.current && m.queue.length === 0) {
+            // stay247 bật -> giữ kết nối, không auto-leave dù hết bài
+            if (m && !m.stay247 && !m.current && m.queue.length === 0) {
                 m.connection.destroy();
                 musicQueues.delete(guildId);
+                musicStore.clearSession(guildId);
             }
         }, 120000);
         return;
@@ -2356,6 +2514,14 @@ async function playNextTrack(guildId) {
 
     if (mq.idleTimeout) { clearTimeout(mq.idleTimeout); mq.idleTimeout = null; }
     mq.current = next;
+    mq.effect = effectKey;
+    // seekBase = số giây đã "bỏ qua" ở đầu bài. Thanh tiến trình = seekBase + playbackDuration
+    // (playbackDuration chỉ đếm thời gian ĐÃ phát của resource hiện tại, nên khi tua phải cộng bù).
+    mq.seekBase = seekSec;
+    // Đi qua ffmpeg khi CẦN tua tới giây X hoặc CÓ áp hiệu ứng; ngược lại giữ đường opus passthrough nhẹ CPU.
+    const useFfmpeg = seekSec > 0 || (effectKey && effectKey !== 'none');
+    // Lưu ảnh chụp phiên để khôi phục nếu bot restart (ghi mỗi lần chuyển bài)
+    persistSession(guildId);
 
     try {
         // Gọi yt-dlp dưới dạng tiến trình con, xuất thẳng audio (webm/opus) ra stdout,
@@ -2425,29 +2591,34 @@ async function playNextTrack(guildId) {
         ytdlProcess.stdout.on('error', () => audioBuffer.destroy());
         mq.currentBuffer = audioBuffer;
 
-        // TỰ ĐỘNG DÒ ĐỊNH DẠNG bằng demuxProbe thay vì ép cứng WebmOpus.
-        // NGUYÊN NHÂN GỐC của bug "bài trong hàng đợi không tự phát": trước đây inputType luôn
-        // là StreamType.WebmOpus, nhưng format 'bestaudio[acodec=opus]/bestaudio' có thể trả về
-        // m4a/aac (không phải webm/opus). Khi đó bộ giải mã WebmOpus hỏng ngay -> resource kết
-        // thúc tức thì -> player về Idle -> bài bị "nuốt" và bỏ qua. Tìm lại thường ra bản opus
-        // nên "lại phát được". demuxProbe đọc thử vài byte đầu để nhận đúng loại (opus/ogg/khác),
-        // loại không hỗ trợ sẽ được ffmpeg-static (đã trỏ FFMPEG_PATH ở trên) tự chuyển mã.
-        const probe = await voiceLib.demuxProbe(audioBuffer);
-        // Trong lúc dò, có thể người dùng đã Skip/Stop sang bài khác -> bỏ qua kết quả cũ
-        if (mq.current !== next) {
-            try { probe.stream.destroy(); } catch { /* đã hủy */ }
-            return;
+        let resource;
+        if (useFfmpeg) {
+            // 🎚️ ĐƯỜNG FFMPEG: cần tua tới giây X (khôi phục/seek) hoặc áp hiệu ứng âm thanh.
+            // ffmpeg đọc audio thô từ yt-dlp, tua/lọc, xuất PCM s16le 48kHz stereo -> StreamType.Raw.
+            const ff = spawnFfmpegAudio(audioBuffer, { seekSec, effectKey });
+            mq.currentFfmpeg = ff;
+            let ffErr = '';
+            ff.stderr?.on('data', (c) => { ffErr += c.toString(); if (ffErr.length > 2000) ffErr = ffErr.slice(-2000); });
+            ff.on('error', (e) => console.error(`❌ [Music] ffmpeg lỗi ở server ${guildId}:`, e.message));
+            // Trong lúc chờ, người dùng có thể đã Skip/Stop -> bỏ qua
+            if (mq.current !== next) { try { ff.kill('SIGKILL'); } catch { /* bỏ qua */ } return; }
+            resource = voiceLib.createAudioResource(ff.stdout, { inputType: voiceLib.StreamType.Raw, inlineVolume: true });
+        } else {
+            // ⚡ ĐƯỜNG OPUS PASSTHROUGH (mặc định, nhẹ CPU): demuxProbe nhận đúng loại rồi truyền thẳng.
+            // NGUYÊN NHÂN GỐC của bug "bài trong hàng đợi không tự phát": trước đây inputType luôn
+            // là StreamType.WebmOpus, nhưng format 'bestaudio[acodec=opus]/bestaudio' có thể trả về
+            // m4a/aac. Khi đó bộ giải mã WebmOpus hỏng ngay -> resource kết thúc tức thì -> bài bị "nuốt".
+            // demuxProbe đọc thử vài byte đầu để nhận đúng loại (opus/ogg/khác).
+            const probe = await voiceLib.demuxProbe(audioBuffer);
+            if (mq.current !== next) {
+                try { probe.stream.destroy(); } catch { /* đã hủy */ }
+                return;
+            }
+            // 🔊 LUÔN bật inlineVolume để nút Tăng/Giảm âm CHỈNH TỨC THÌ (setVolume) mà KHÔNG phải
+            // phát lại bài từ đầu. Đánh đổi: inlineVolume tốn CPU hơn truyền thẳng; chấp nhận để chỉnh âm mượt.
+            resource = voiceLib.createAudioResource(probe.stream, { inputType: probe.type, inlineVolume: true });
         }
-
-        // ⚡ NHẸ CPU: chỉ bật inlineVolume (giải mã -> chỉnh -> mã hóa lại Opus TỪNG GÓI, rất nặng
-        // trên host yếu -> gây tụt/hụt tiếng) KHI âm lượng khác 100%. Mặc định 100% thì truyền
-        // thẳng Opus, không đụng CPU. Khi người dùng bấm chỉnh âm lượng, bài sẽ được phát lại với
-        // inlineVolume (xem replayCurrentTrack ở handler nút).
-        // 🔊 LUÔN bật inlineVolume để nút Tăng/Giảm âm CHỈNH TỨC THÌ (setVolume) mà KHÔNG phải
-        // phát lại bài từ đầu. Đánh đổi: inlineVolume giải mã -> chỉnh -> mã hóa lại Opus từng gói
-        // nên tốn CPU hơn truyền thẳng; chấp nhận để có trải nghiệm chỉnh âm mượt theo yêu cầu.
-        const resource = voiceLib.createAudioResource(probe.stream, { inputType: probe.type, inlineVolume: true });
-        resource.volume.setVolume(mq.volume);
+        if (resource.volume) resource.volume.setVolume(mq.volume);
         mq.currentResource = resource;
         mq.player.play(resource);
 
@@ -2522,7 +2693,12 @@ async function getOrCreateMusicQueue(guild, voiceChannel, textChannel) {
         pendingReplay: false,   // cờ báo lần playNextTrack tới là "phát lại để đổi âm lượng", không phải chuyển bài
         nowPlayingMessage: null, idleTimeout: null,
         ownerId: null,          // ID người mở panel nhạc — chỉ người này được thao tác các nút
-        progressTimer: null     // setInterval cập nhật thanh tiến trình LIVE
+        progressTimer: null,    // setInterval cập nhật thanh tiến trình LIVE
+        currentFfmpeg: null,    // tiến trình ffmpeg khi seek/hiệu ứng (để kill khi chuyển bài)
+        effect: 'none',         // hiệu ứng âm thanh đang áp (xem AUDIO_EFFECTS)
+        seekBase: 0,            // giây đã tua tới của bài hiện tại (progress = seekBase + playbackDuration)
+        autoplay: false,        // autoplay radio khi hết hàng đợi
+        stay247: false          // ở lại kênh 24/7, không auto-leave
     };
     musicQueues.set(guild.id, mq);
 
@@ -2543,6 +2719,7 @@ async function getOrCreateMusicQueue(guild, voiceChannel, textChannel) {
         } catch {
             connection.destroy();
             musicQueues.delete(guild.id);
+            musicStore.clearSession(guild.id);
         }
     });
 
@@ -2551,6 +2728,7 @@ async function getOrCreateMusicQueue(guild, voiceChannel, textChannel) {
     } catch (err) {
         connection.destroy();
         musicQueues.delete(guild.id);
+        musicStore.clearSession(guild.id);
         return { error: '❌ Không thể kết nối vào kênh thoại (quá thời gian chờ).' };
     }
 
@@ -2723,12 +2901,14 @@ client.on('voiceStateUpdate', (oldState) => {
     // 🎵 NHẠC: rời kênh khi không còn ai nghe
     if (mq) {
         const vc = oldState.guild.channels.cache.get(mq.voiceChannelId);
-        if (vc && vc.members.filter(m => !m.user.bot).size === 0) {
+        // stay247 bật -> ở lại kênh dù không còn ai nghe (chế độ 24/7)
+        if (vc && !mq.stay247 && vc.members.filter(m => !m.user.bot).size === 0) {
             if (mq.idleTimeout) clearTimeout(mq.idleTimeout);
             killCurrentProcess(mq);
             mq.player.stop();
             try { mq.connection.destroy(); } catch {}
             musicQueues.delete(guildId);
+            musicStore.clearSession(guildId);
             if (mq.textChannel) mq.textChannel.send('👋 Đã rời kênh thoại do không còn ai nghe nhạc.').catch(() => null);
         }
     }
@@ -2927,6 +3107,9 @@ client.once('ready', async () => {
     } catch (e) {
         console.error('❌ [InternalAPI] Không khởi động được:', e?.message);
     }
+
+    // 🔄 Khôi phục các phiên phát nhạc đang dở (session-restore độc quyền)
+    restoreMusicSessions().catch(e => console.error('❌ [Music] restoreMusicSessions lỗi:', e?.message));
 
 
     const activities = [
@@ -4640,6 +4823,7 @@ client.on('messageCreate', async (message) => {
 
         if (mq.current) {
             if (statusMsg) statusMsg.edit(buildMusicNoticePayload('Đã thêm vào hàng đợi', `**${track.title}**\n> Vị trí trong hàng đợi: **#${mq.queue.length}**`, 0x2ECC71)).catch(() => null);
+            persistSession(message.guild.id); // lưu hàng đợi mới để khôi phục đúng sau restart
         } else {
             // Dùng CHÍNH tin trạng thái này làm tin "Đang phát" -> tránh bug "kẹt Đang tải"
             if (statusMsg) {
@@ -6680,6 +6864,7 @@ client.on('interactionCreate', async interaction => {
             mq.queue.push(track);
 
             if (mq.current) {
+                persistSession(guild.id); // lưu hàng đợi mới để khôi phục đúng sau restart
                 return interaction.editReply({ content: `✅ Đã thêm vào hàng đợi: **${track.title}** (vị trí #${mq.queue.length})` });
             } else {
                 // Tin defer (deferReply) KHÔNG mang cờ IsComponentsV2 nên không edit thành V2 được.
@@ -7018,6 +7203,7 @@ client.on('interactionCreate', async interaction => {
                 const lastTrack = mq.current;
                 const byUser = `<@${user.id}>`;
                 musicQueues.delete(guild.id);
+                musicStore.clearSession(guild.id); // dừng thủ công -> không khôi phục sau restart
 
                 // Trả lời interaction TRƯỚC bằng Components V2 đẹp — đảm bảo không bao giờ
                 // "không phản hồi kịp thời" kể cả khi dọn tài nguyên bên dưới ném lỗi.
@@ -7040,6 +7226,7 @@ client.on('interactionCreate', async interaction => {
 
             if (customId === 'music_loop') {
                 mq.loop = mq.loop === 'off' ? 'track' : (mq.loop === 'track' ? 'queue' : 'off');
+                persistSession(guild.id); // lưu chế độ lặp để khôi phục đúng sau restart
                 return interaction.update(buildMusicPayload(mq)).catch(() => null);
             }
 
@@ -7048,6 +7235,7 @@ client.on('interactionCreate', async interaction => {
                 mq.volume = Math.max(0, Math.min(1.5, Math.round((mq.volume + delta) * 100) / 100));
                 // inlineVolume LUÔN bật (xem playNextTrack) -> chỉnh âm lượng TỨC THÌ, không phát lại bài.
                 if (mq.currentResource?.volume) mq.currentResource.volume.setVolume(mq.volume);
+                persistSession(guild.id); // lưu âm lượng để khôi phục đúng sau restart
                 return interaction.update(buildMusicPayload(mq)).catch(() => null);
             }
 
