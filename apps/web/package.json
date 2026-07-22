@@ -4,10 +4,15 @@
   "private": true,
   "description": "Website & dashboard cho Mimi — Discord music/community bot",
   "type": "module",
+  "main": "server.js",
+  "engines": {
+    "node": ">=18.17.0"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "start:passenger": "node server.js",
     "lint": "next lint",
     "typecheck": "tsc --noEmit"
   },
