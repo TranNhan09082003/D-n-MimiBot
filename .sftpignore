@@ -9,3 +9,6 @@ __pycache__
 *.txt
 created_channels.json
 *.json.tmp
+web
+docs
+*.md

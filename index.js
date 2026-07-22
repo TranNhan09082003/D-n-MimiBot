@@ -10,6 +10,7 @@ const path = require('path');
 const https = require('https');
 const { PassThrough, Readable } = require('stream');
 const { colors, buildBaseEmbed, generateProgressBar } = require('./uiBuilder');
+const { startInternalApi } = require('./internalApi');
 
 // -----------------------------------------------------------------
 // 🕐 HELPER MÚI GIỜ VIỆT NAM CỐ ĐỊNH (UTC+7)
@@ -2379,6 +2380,22 @@ async function postUpdateAnnouncement() {
 client.once('ready', async () => {
     console.log(`🤖 Bot ${client.user.tag} đã Online thành công!`);
     await syncChannels();
+
+    // 🔌 Khởi động Internal API cho website (chỉ chạy nếu đã đặt MIMI_API_TOKEN)
+    try {
+        startInternalApi({
+            client,
+            config,
+            getGuildConfig,
+            saveConfig,
+            musicQueues,
+            voiceLib,
+            killCurrentProcess,
+            logger: console
+        });
+    } catch (e) {
+        console.error('❌ [InternalAPI] Không khởi động được:', e?.message);
+    }
 
 
     const activities = [
