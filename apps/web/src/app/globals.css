@@ -1,0 +1,272 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* =====================================================================
+   🎨 MIMI DESIGN SYSTEM — biến màu, chuyển động, nền
+   ===================================================================== */
+:root {
+  --mimi-night: #070711;
+  --mimi-surface: #10101c;
+  --mimi-surface-2: #17172a;
+  --mimi-lilac: #b89cff;
+  --mimi-pink: #ff86c8;
+  --mimi-cyan: #65e6ff;
+  --mimi-cream: #fff5e9;
+  --mimi-text: #f7f4ff;
+  --mimi-muted: #a5a1b5;
+  --mimi-success: #73f5ae;
+  --mimi-warning: #ffd475;
+  --mimi-danger: #ff718b;
+  --mimi-border: rgba(184, 156, 255, 0.14);
+  --mimi-radius: 18px;
+}
+
+* {
+  border-color: var(--mimi-border);
+}
+
+html {
+  scroll-behavior: smooth;
+  background: var(--mimi-night);
+}
+
+body {
+  background: var(--mimi-night);
+  color: var(--mimi-text);
+  font-family: var(--font-be-vietnam), system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow-x: hidden;
+}
+
+h1, h2, h3, h4, .font-display {
+  font-family: var(--font-sora), var(--font-be-vietnam), sans-serif;
+  letter-spacing: -0.02em;
+}
+
+.font-mono {
+  font-family: var(--font-jetbrains), ui-monospace, monospace;
+}
+
+/* Nền vũ trụ âm thanh — noise rất nhẹ để tránh cảm giác gradient AI */
+.mimi-bg {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background:
+    radial-gradient(1200px 600px at 15% -10%, rgba(184, 156, 255, 0.16), transparent 60%),
+    radial-gradient(1000px 500px at 90% 10%, rgba(101, 230, 255, 0.10), transparent 55%),
+    radial-gradient(900px 700px at 50% 110%, rgba(255, 134, 200, 0.12), transparent 60%),
+    var(--mimi-night);
+}
+
+.mimi-noise::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  opacity: 0.035;
+  pointer-events: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* Viền gradient động cho CTA chính */
+.mimi-cta {
+  position: relative;
+  background: linear-gradient(120deg, var(--mimi-lilac), var(--mimi-pink));
+  color: #1a0b1e;
+  font-weight: 600;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  box-shadow: 0 8px 30px rgba(184, 156, 255, 0.28);
+}
+.mimi-cta:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 40px rgba(255, 134, 200, 0.35);
+}
+
+.mimi-card {
+  background: linear-gradient(180deg, var(--mimi-surface-2), var(--mimi-surface));
+  border: 1px solid var(--mimi-border);
+  border-radius: var(--mimi-radius);
+}
+
+/* Sound Core — lõi âm thanh ở hero */
+.sound-core {
+  border-radius: 999px;
+  background: radial-gradient(circle at 35% 30%, var(--mimi-cream), var(--mimi-pink) 40%, var(--mimi-lilac) 75%, transparent);
+  filter: blur(0.3px);
+  animation: corePulse 3.2s ease-in-out infinite;
+}
+@keyframes corePulse {
+  0%, 100% { transform: scale(1); opacity: 0.95; }
+  50% { transform: scale(1.06); opacity: 1; }
+}
+
+.sound-ring {
+  border: 1px solid rgba(184, 156, 255, 0.35);
+  border-radius: 999px;
+  animation: ringExpand 3.6s ease-out infinite;
+}
+@keyframes ringExpand {
+  0% { transform: scale(0.6); opacity: 0.7; }
+  100% { transform: scale(1.8); opacity: 0; }
+}
+
+/* Thanh equalizer động */
+.eq-bar {
+  width: 4px;
+  background: linear-gradient(180deg, var(--mimi-cyan), var(--mimi-lilac));
+  border-radius: 4px;
+  animation: eq 1s ease-in-out infinite;
+}
+@keyframes eq {
+  0%, 100% { height: 20%; }
+  50% { height: 100%; }
+}
+
+/* Trạng thái focus rõ ràng cho accessibility */
+:focus-visible {
+  outline: 2px solid var(--mimi-cyan);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* Tôn trọng người dùng muốn giảm chuyển động */
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* Range slider (volume / progress ở demo player) */
+.mimi-range {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(184, 156, 255, 0.2);
+  cursor: pointer;
+}
+.mimi-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: var(--mimi-lilac);
+  border: 2px solid var(--mimi-night);
+  box-shadow: 0 0 0 1px var(--mimi-lilac);
+}
+.mimi-range::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--mimi-night);
+  border-radius: 999px;
+  background: var(--mimi-lilac);
+}
+.mimi-range:focus-visible {
+  outline: 2px solid var(--mimi-cyan);
+  outline-offset: 4px;
+}
+
+/* Skip link cho keyboard navigation */
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 100;
+  padding: 12px 18px;
+  background: var(--mimi-lilac);
+  color: #12071a;
+  border-radius: 0 0 12px 0;
+  font-weight: 600;
+}
+.skip-link:focus {
+  left: 0;
+}
+
+/* =====================================================================
+   ✨ HIỆU ỨNG TRANG TRÍ — dùng cho hero, orb, waveform, bento
+   ===================================================================== */
+
+/* Text gradient thương hiệu */
+.mimi-gradient-text {
+  background: linear-gradient(120deg, var(--mimi-text) 0%, var(--mimi-lilac) 55%, var(--mimi-pink) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+}
+
+/* Viền gradient mảnh cho card nổi bật */
+.mimi-ring-gradient {
+  background: linear-gradient(130deg, var(--mimi-lilac), var(--mimi-pink), var(--mimi-cyan));
+  padding: 1px;
+  border-radius: var(--mimi-radius);
+}
+
+/* Sound Core orb ở hero — vòng lan toả sóng âm */
+@keyframes coreGlow {
+  0%, 100% { transform: scale(1); box-shadow: 0 0 60px rgba(184, 156, 255, 0.35); }
+  50% { transform: scale(1.05); box-shadow: 0 0 90px rgba(255, 134, 200, 0.5); }
+}
+.animate-core-glow {
+  animation: coreGlow 4s ease-in-out infinite;
+}
+
+@keyframes waveRing {
+  0% { transform: scale(0.7); opacity: 0.65; }
+  100% { transform: scale(1.9); opacity: 0; }
+}
+.animate-wave-ring {
+  animation: waveRing 3.5s ease-out infinite;
+}
+
+@keyframes orbit {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.animate-orbit {
+  animation: orbit 24s linear infinite;
+}
+
+/* Thanh sóng âm cho player demo */
+@keyframes waveBar {
+  0%, 100% { transform: scaleY(0.25); }
+  50% { transform: scaleY(1); }
+}
+.animate-wave-bar {
+  transform-origin: bottom;
+  animation: waveBar 1.1s ease-in-out infinite;
+}
+
+/* Hiệu ứng shimmer cho skeleton "Đang đồng bộ" */
+@keyframes shimmer {
+  100% { transform: translateX(100%); }
+}
+.mimi-shimmer {
+  position: relative;
+  overflow: hidden;
+}
+.mimi-shimmer::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgba(184, 156, 255, 0.12), transparent);
+  animation: shimmer 1.8s infinite;
+}
+
+/* Scrollbar tuỳ biến */
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-track { background: var(--mimi-night); }
+::-webkit-scrollbar-thumb { background: #25253e; border-radius: 6px; }
+::-webkit-scrollbar-thumb:hover { background: var(--mimi-lilac); }
+
+/* Tiện ích ẩn thanh cuộn ngang cho hàng chip lệnh */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }

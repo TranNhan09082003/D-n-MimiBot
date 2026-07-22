@@ -24,7 +24,7 @@ jobs:
           remote_path: './'
           sftp_only: true
           sftp_args: '-o ConnectTimeout=5'
-          args: '--exclude=node_modules --exclude=.git --exclude=.github --exclude=created_channels.json --exclude=*.tmp --exclude=*.log --exclude=*.json.tmp --exclude=web --exclude=docs --exclude=*.md'
+          args: '--exclude=node_modules --exclude=.git --exclude=.github --exclude=created_channels.json --exclude=*.tmp --exclude=*.log --exclude=*.json.tmp --exclude=web --exclude=apps --exclude=docs --exclude=*.md'
 
       - name: Restart Bot via Pterodactyl API
         env:
