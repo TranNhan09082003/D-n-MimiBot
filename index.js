@@ -3011,6 +3011,14 @@ async function playNextTrack(guildId, opts = {}) {
     const seekSec = Math.max(0, Math.floor(opts.seekSec || 0));
     const effectKey = opts.effectKey || mq.effect || 'none';
 
+    // 🔒 Chống race "đổi hiệu ứng làm bot tự ngắt": mỗi lần gọi tạo 1 "thế hệ" mới. Bật cờ transitioning
+    // để listener Idle bỏ qua sự kiện Idle "ảo" mà killCurrentProcess sắp gây ra (do hủy buffer bài đang
+    // phát). Nếu có lệnh playNextTrack khác chen vào (skip/đổi bài giữa lúc tải), genId sẽ lệch -> lần cũ
+    // KHÔNG được tự tắt cờ của lần mới. Cờ được tắt ở tất cả nhánh thoát bên dưới (kèm kiểm tra genId).
+    const genId = (mq.playGeneration = (mq.playGeneration || 0) + 1);
+    mq.transitioning = true;
+    const clearTransition = () => { if (mq.playGeneration === genId) mq.transitioning = false; };
+
     killCurrentProcess(mq);
 
     let next;
@@ -3060,6 +3068,7 @@ async function playNextTrack(guildId, opts = {}) {
                 musicStore.clearSession(guildId);
             }
         }, 120000);
+        clearTransition(); // hết hàng đợi thật sự -> mở lại cờ để lượt phát sau hoạt động bình thường
         return;
     }
 
@@ -3157,7 +3166,7 @@ async function playNextTrack(guildId, opts = {}) {
             ff.stderr?.on('data', (c) => { ffErr += c.toString(); if (ffErr.length > 2000) ffErr = ffErr.slice(-2000); });
             ff.on('error', (e) => console.error(`❌ [Music] ffmpeg lỗi ở server ${guildId}:`, e.message));
             // Trong lúc chờ, người dùng có thể đã Skip/Stop -> bỏ qua
-            if (mq.current !== next) { try { ff.kill('SIGKILL'); } catch { /* bỏ qua */ } return; }
+            if (mq.current !== next) { try { ff.kill('SIGKILL'); } catch { /* bỏ qua */ } clearTransition(); return; }
             resource = voiceLib.createAudioResource(ff.stdout, { inputType: voiceLib.StreamType.Raw, inlineVolume: true });
         } else {
             // ⚡ ĐƯỜNG OPUS PASSTHROUGH (mặc định, nhẹ CPU): demuxProbe nhận đúng loại rồi truyền thẳng.
@@ -3168,6 +3177,7 @@ async function playNextTrack(guildId, opts = {}) {
             const probe = await voiceLib.demuxProbe(audioBuffer);
             if (mq.current !== next) {
                 try { probe.stream.destroy(); } catch { /* đã hủy */ }
+                clearTransition();
                 return;
             }
             // 🔊 LUÔN bật inlineVolume để nút Tăng/Giảm âm CHỈNH TỨC THÌ (setVolume) mà KHÔNG phải
@@ -3177,6 +3187,10 @@ async function playNextTrack(guildId, opts = {}) {
         if (resource.volume) resource.volume.setVolume(mq.volume);
         mq.currentResource = resource;
         mq.player.play(resource);
+        // ✅ Đã cấp resource mới cho player -> tắt cờ transitioning. Idle "ảo" của buffer cũ (nếu có)
+        // đã xảy ra trong lúc await demuxProbe/ffmpeg ở trên và bị bỏ qua; từ đây Idle THẬT (bài mới
+        // kết thúc / stream hỏng) lại được phép chuyển bài như bình thường.
+        clearTransition();
 
         // Dùng LẠI chính tin nhắn trạng thái (VD "Đang tải...") làm tin "Đang phát" bằng cách EDIT nó.
         // NGUYÊN NHÂN bug "thông báo vẫn Đang tải nhưng đã phát nhạc": trước đây tin trạng thái là 1
@@ -3265,7 +3279,14 @@ async function getOrCreateMusicQueue(guild, voiceChannel, textChannel) {
     };
     musicQueues.set(guild.id, mq);
 
-    player.on(voiceLib.AudioPlayerStatus.Idle, () => playNextTrack(guild.id));
+    player.on(voiceLib.AudioPlayerStatus.Idle, () => {
+        // Bỏ qua Idle "ảo": khi đổi hiệu ứng / tua / phát lại, chính playNextTrack tự hủy buffer bài cũ
+        // khiến AudioPlayer nhả Idle. Nếu vẫn nhảy bài ở đây, bot sẽ tưởng bài đã hết -> chuyển bài / rời
+        // kênh (đúng lỗi "đổi hiệu ứng làm bot tự ngắt"). Chỉ chuyển bài khi KHÔNG trong lúc thay resource.
+        const m = musicQueues.get(guild.id);
+        if (m && m.transitioning) return;
+        playNextTrack(guild.id);
+    });
     player.on('error', (err) => {
         console.error(`❌ [Music] Player error ở server ${guild.id}:`, err.message);
         if (mq.textChannel && mq.current) {
