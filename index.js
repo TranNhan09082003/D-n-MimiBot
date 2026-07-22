@@ -1998,6 +1998,10 @@ function toTrack(info) {
 // Tìm bài hát bằng yt-dlp: nếu là link YouTube hợp lệ thì lấy info trực tiếp,
 // ngược lại nhờ yt-dlp tìm kiếm trên YouTube (ytsearchN:) rồi tự động BỎ QUA những
 // kết quả riêng tư / giới hạn độ tuổi / cần đăng nhập, chỉ trả về kết quả đầu tiên phát được.
+// ⏱️ Timeout cho mỗi lệnh yt-dlp lấy metadata: nếu YouTube/host chậm hoặc treo, execa sẽ
+// kill tiến trình và ném lỗi thay vì để "Đang tìm bài hát..." kẹt vô hạn.
+const YT_META_TIMEOUT_MS = 20000;
+
 async function searchYoutube(query) {
     const isDirectUrl = YT_URL_REGEX.test(query.trim());
 
@@ -2009,7 +2013,7 @@ async function searchYoutube(query) {
             noPlaylist: true,
             skipDownload: true,
             ...YT_COMMON_OPTS
-        });
+        }, { timeout: YT_META_TIMEOUT_MS });
         if (!info || (!info.id && !info.webpage_url)) return null;
         if (isBlockedVideo(info)) {
             const err = new Error('Video này đang ở chế độ riêng tư hoặc bị giới hạn độ tuổi, bot không thể phát.');
@@ -2019,17 +2023,40 @@ async function searchYoutube(query) {
         return toTrack(info);
     }
 
-    // Trường hợp tìm bằng từ khóa: lấy nhiều kết quả rồi lọc bỏ video riêng tư/giới hạn tuổi/không khả dụng.
-    const raw = await ytDlpExec(`ytsearch${SEARCH_CANDIDATE_COUNT}:${query}`, {
+    // 🚀 TÌM BẰNG TỪ KHÓA — TỐI ƯU TỐC ĐỘ:
+    // BƯỚC 1: tìm NHANH bằng flatPlaylist — chỉ đọc trang kết quả tìm kiếm để lấy id/tên/thời lượng,
+    // KHÔNG trích xuất đầy đủ (format/URL) cho từng video. Đây là điểm khác biệt lớn: lệnh cũ
+    // ytsearch5 + dumpSingleJson phải extract ĐẦY ĐỦ cả 5 video (mỗi video gọi API android/ios/web
+    // lấy mọi định dạng) -> cực chậm, gây kẹt "Đang tìm bài hát...".
+    const flat = await ytDlpExec(`ytsearch${SEARCH_CANDIDATE_COUNT}:${query}`, {
         dumpSingleJson: true,
-        noPlaylist: true,
+        flatPlaylist: true,   // chỉ lấy metadata nhẹ, không trích format từng video
         skipDownload: true,
-        ignoreErrors: true, // 1 video lỗi/không trích xuất được trong danh sách sẽ không làm hỏng cả kết quả tìm kiếm
+        ignoreErrors: true,
         ...YT_COMMON_OPTS
-    });
+    }, { timeout: YT_META_TIMEOUT_MS });
 
-    const entries = raw?.entries ? raw.entries : (raw ? [raw] : []);
-    for (const info of entries) {
+    const flatEntries = (flat?.entries || []).filter(Boolean);
+    if (flatEntries.length === 0) return null;
+
+    // BƯỚC 2: trích xuất đầy đủ LẦN LƯỢT từng ứng viên, DỪNG ngay khi gặp bài phát được.
+    // Trường hợp thường gặp (video đầu OK) -> chỉ 1 lần extract đầy đủ, nhanh gấp nhiều lần
+    // so với extract cả 5. Chỉ khi video đầu bị chặn mới trích tiếp video sau.
+    for (const entry of flatEntries) {
+        const vid = entry.id || entry.url;
+        if (!vid) continue;
+        const url = /^https?:/i.test(vid) ? vid : `https://www.youtube.com/watch?v=${vid}`;
+        let info;
+        try {
+            info = await ytDlpExec(url, {
+                dumpSingleJson: true,
+                noPlaylist: true,
+                skipDownload: true,
+                ...YT_COMMON_OPTS
+            }, { timeout: YT_META_TIMEOUT_MS });
+        } catch {
+            continue; // video này trích xuất lỗi/timeout -> thử ứng viên kế tiếp
+        }
         if (!info || (!info.id && !info.webpage_url)) continue;
         if (isBlockedVideo(info)) continue; // ⛔ Bỏ qua — riêng tư / giới hạn độ tuổi / cần đăng nhập
         return toTrack(info);
