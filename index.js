@@ -2392,6 +2392,56 @@ function buildFavoritesPayload(favorites) {
     return { components: [container, row], flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral };
 }
 
+// 📁 Payload danh sách TẤT CẢ album của 1 user (tên + số bài). ephemeral=true -> kèm cờ Ephemeral.
+function buildAlbumListContainer(albumNames, getCount) {
+    if (!albumNames || albumNames.length === 0) {
+        return buildMusicNoticeContainer(
+            'Bạn chưa có album nào',
+            'Tạo album đầu tiên bằng `/album tao tên:<tên album>`, rồi dùng `/album them` khi đang nghe bài bạn thích.',
+            0x99AAB5
+        );
+    }
+    const lines = albumNames.slice(0, 25).map((n, i) => `${i + 1}. **${n}** \`${getCount(n)} bài\``);
+    return buildMusicNoticeContainer(
+        `Album của bạn (${albumNames.length})`,
+        lines.join('\n') + '\n\n-# Xem chi tiết: `/album xem tên:<tên>` — Phát: `/album phat tên:<tên>`',
+        0x5865F2
+    );
+}
+
+// 📁 Payload CHI TIẾT 1 album (danh sách bài + select menu phát 1 bài). tracks = mảng track.
+function buildAlbumDetailPayload(name, tracks) {
+    const list = tracks || [];
+    if (list.length === 0) {
+        return {
+            components: [buildMusicNoticeContainer(`Album "${name}" đang trống`, 'Thêm bài vào bằng `/album them tên:' + name + '` khi đang nghe một bài.', 0x99AAB5)],
+            flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral
+        };
+    }
+    const lines = list.slice(0, 15).map((t, i) => `${i + 1}. **${t.title}** \`${formatDuration(t.duration)}\``);
+    let body = lines.join('\n');
+    if (list.length > 15) body += `\n-# ...và ${list.length - 15} bài khác`;
+    const container = buildMusicNoticeContainer(
+        `Album "${name}" (${list.length} bài)`,
+        body + '\n\n-# Chọn 1 bài để phát ngay, hoặc dùng `/album phat` để phát cả album.',
+        0x5865F2
+    );
+    const options = list.slice(0, 25).map((t, i) =>
+        new StringSelectMenuOptionBuilder()
+            .setLabel(`${i + 1}. ${t.title}`.slice(0, 100))
+            .setDescription(formatDuration(t.duration))
+            .setValue(String(i))
+    );
+    // customId nhúng tên album (mã hóa) để handler biết phát từ album nào.
+    const row = new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+            .setCustomId(`music_album_play_select:${encodeURIComponent(name).slice(0, 80)}`)
+            .setPlaceholder('▶ Chọn 1 bài trong album để phát...')
+            .addOptions(options)
+    );
+    return { components: [container, row], flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral };
+}
+
 // 🔴 THANH TIẾN TRÌNH LIVE: cập nhật tin "Đang phát" định kỳ để phút:giây và thanh tiến trình
 // nhảy theo thời gian thực. CHÚ Ý rate limit của Discord: chỉnh sửa 1 tin nhắn quá dày sẽ bị
 // giới hạn -> đặt nhịp 7 giây (đủ mượt mà an toàn). Tự dừng khi bài kết thúc / skip / stop.
@@ -2547,6 +2597,31 @@ async function enqueueKnownTrack(guild, voiceChannel, textChannel, track, reques
     if (statusMsg) mq.nowPlayingMessage = statusMsg;
     await playNextTrack(guild.id);
     return { ok: true, queued: false, title: norm.title };
+}
+
+// Đưa TOÀN BỘ một album (mảng track) vào hàng đợi. Bài đầu phát ngay nếu bot đang rảnh,
+// các bài còn lại xếp hàng đợi. Trả về { ok, error, count, playing } (playing=tên bài đang phát).
+async function enqueueAlbum(guild, voiceChannel, textChannel, tracks, requesterId) {
+    if (!isMusicReady()) return { ok: false, error: '❌ Bot chưa được cài đủ thư viện nghe nhạc.' };
+    const list = (tracks || []).map(MusicStore.normalizeTrack).filter(Boolean);
+    if (list.length === 0) return { ok: false, error: '❌ Album này đang trống, không có bài nào để phát.' };
+    const botPerms = voiceChannel.permissionsFor(guild.members.me);
+    if (!botPerms?.has(PermissionFlagsBits.Connect) || !botPerms?.has(PermissionFlagsBits.Speak)) {
+        return { ok: false, error: '❌ Bot không có quyền **Kết nối** hoặc **Nói** trong kênh thoại này.' };
+    }
+    const { mq, error } = await getOrCreateMusicQueue(guild, voiceChannel, textChannel);
+    if (error) return { ok: false, error };
+    if (!mq.ownerId) mq.ownerId = requesterId;
+    for (const t of list) mq.queue.push({ ...t, requestedBy: 'Album cá nhân' });
+    if (mq.current) {
+        persistSession(guild.id);
+        return { ok: true, count: list.length, playing: null };
+    }
+    const first = list[0];
+    const statusMsg = await textChannel.send(buildMusicNoticePayload('Đang tải album', `**${first.title}** và ${list.length - 1} bài khác...`)).catch(() => null);
+    if (statusMsg) mq.nowPlayingMessage = statusMsg;
+    await playNextTrack(guild.id);
+    return { ok: true, count: list.length, playing: first.title };
 }
 
 // Tua bài đang phát tới giây targetSec (dùng chung cho slash /sek và prefix misek).
@@ -3568,6 +3643,20 @@ client.once('ready', async () => {
         new SlashCommandBuilder()
             .setName('yeuthich')
             .setDescription('Xem danh sách bài hát yêu thích của bạn và phát lại'),
+
+        new SlashCommandBuilder()
+            .setName('album')
+            .setDescription('Quản lý album nhạc cá nhân của bạn')
+            .addSubcommand(s => s.setName('xem').setDescription('Xem tất cả album của bạn hoặc chi tiết 1 album')
+                .addStringOption(o => o.setName('tên').setDescription('Tên album muốn xem chi tiết').setRequired(false)))
+            .addSubcommand(s => s.setName('tao').setDescription('Tạo một album mới')
+                .addStringOption(o => o.setName('tên').setDescription('Tên album (tối đa 50 ký tự)').setRequired(true)))
+            .addSubcommand(s => s.setName('them').setDescription('Thêm bài ĐANG PHÁT vào một album')
+                .addStringOption(o => o.setName('tên').setDescription('Tên album cần thêm bài vào').setRequired(true)))
+            .addSubcommand(s => s.setName('phat').setDescription('Phát toàn bộ một album vào hàng đợi')
+                .addStringOption(o => o.setName('tên').setDescription('Tên album cần phát').setRequired(true)))
+            .addSubcommand(s => s.setName('xoa').setDescription('Xóa một album của bạn')
+                .addStringOption(o => o.setName('tên').setDescription('Tên album cần xóa').setRequired(true))),
 
         new SlashCommandBuilder()
             .setName('help')
@@ -4878,6 +4967,58 @@ client.on('messageCreate', async (message) => {
     }
 
     // 8. Lệnh phát nhạc bằng prefix: miplay hoặc mipl [tên bài hát / link YouTube]
+    if (command === 'mialbum' || command === 'mial') {
+        const rest = message.content.slice(args[0].length).trim();
+        const spaceIdx = rest.indexOf(' ');
+        const sub = (spaceIdx === -1 ? rest : rest.slice(0, spaceIdx)).toLowerCase();
+        const albumName = (spaceIdx === -1 ? '' : rest.slice(spaceIdx + 1)).trim();
+        const uid = message.author.id;
+        const reply = (payload) => message.reply({ ...payload, allowedMentions: { repliedUser: false } }).catch(() => null);
+        const noticeV2 = (title, body, accent) => reply({ components: [buildMusicNoticeContainer(title, body, accent)], flags: MessageFlags.IsComponentsV2 });
+
+        if (!sub || sub === 'xem' || sub === 'list') {
+            if (albumName) {
+                const album = musicStore.getAlbum(uid, albumName);
+                if (!album) return noticeV2('Không tìm thấy album', `Bạn chưa có album tên **${albumName}**.`, 0xF1C40F);
+                const p = buildAlbumDetailPayload(albumName, album);
+                return reply({ components: p.components, flags: MessageFlags.IsComponentsV2 });
+            }
+            const names = musicStore.getAlbumNames(uid);
+            return reply({ components: [buildAlbumListContainer(names, (n) => (musicStore.getAlbum(uid, n) || []).length)], flags: MessageFlags.IsComponentsV2 });
+        }
+        if (sub === 'tao') {
+            const res = musicStore.createAlbum(uid, albumName);
+            if (!res.ok) return noticeV2('Không tạo được album', res.reason === 'exists' ? 'Bạn đã có album trùng tên này rồi.' : 'Tên album không hợp lệ.', 0xF1C40F);
+            return noticeV2('Đã tạo album', `Album **${res.name}** đã sẵn sàng. Thêm bài bằng \`mialbum them ${res.name}\` khi đang nghe nhạc.`, 0x57F287);
+        }
+        if (sub === 'them' || sub === 'add') {
+            const mq = musicQueues.get(message.guild.id);
+            if (!mq || !mq.current) return noticeV2('Không có bài đang phát', 'Hãy phát một bài trước, rồi mới thêm vào album.', 0xF1C40F);
+            if (!albumName) return noticeV2('Thiếu tên album', 'Cú pháp: `mialbum them <tên album>`.', 0xF1C40F);
+            const res = musicStore.addToAlbum(uid, albumName, mq.current);
+            if (!res.ok) {
+                const msg = res.reason === 'no_album' ? `Bạn chưa có album tên **${albumName}**.` : res.reason === 'duplicate' ? 'Bài này đã có trong album rồi.' : 'Bài hát không hợp lệ.';
+                return noticeV2('Không thêm được', msg, 0xF1C40F);
+            }
+            return noticeV2('Đã thêm vào album', `**${mq.current.title}** đã được lưu vào album **${albumName}**.`, 0x57F287);
+        }
+        if (sub === 'phat' || sub === 'play') {
+            const album = musicStore.getAlbum(uid, albumName);
+            if (!album) return noticeV2('Không tìm thấy album', `Bạn chưa có album tên **${albumName}**.`, 0xF1C40F);
+            const voiceChannel = message.member.voice?.channel;
+            if (!voiceChannel) return noticeV2('Bạn chưa vào kênh thoại', 'Hãy vào một kênh thoại trước khi phát album.', 0xF1C40F);
+            const res = await enqueueAlbum(message.guild, voiceChannel, message.channel, album, uid);
+            if (!res.ok) return reply({ content: res.error });
+            return reply({ content: res.playing ? `▶ Đang phát album **${albumName}** (**${res.count}** bài). Bắt đầu: **${res.playing}**.` : `✅ Đã thêm **${res.count}** bài từ album **${albumName}** vào hàng đợi.` });
+        }
+        if (sub === 'xoa' || sub === 'delete') {
+            const ok = musicStore.deleteAlbum(uid, albumName);
+            if (!ok) return noticeV2('Không tìm thấy album', `Bạn chưa có album tên **${albumName}**.`, 0xF1C40F);
+            return noticeV2('Đã xóa album', `Album **${albumName}** đã được xóa.`, 0x99AAB5);
+        }
+        return noticeV2('Lệnh album không hợp lệ', 'Các lệnh: `xem`, `tao`, `them`, `phat`, `xoa`.\nVí dụ: `mialbum tao Nhạc chill`', 0xF1C40F);
+    }
+
     if (command === 'miyt' || command === 'miyeuthich' || command === 'mifav') {
         const favorites = musicStore.getFavorites(message.author.id);
         const payload = buildFavoritesPayload(favorites);
@@ -7041,6 +7182,70 @@ client.on('interactionCreate', async interaction => {
             return interaction.reply(buildFavoritesPayload(favorites));
         }
 
+        if (commandName === 'album') {
+            const sub = options.getSubcommand();
+
+            if (sub === 'xem') {
+                const name = options.getString('tên');
+                if (name) {
+                    const album = musicStore.getAlbum(user.id, name);
+                    if (!album) return interaction.reply(buildMusicNoticeEphemeral('Không tìm thấy album', `Bạn chưa có album tên **${name}**. Xem danh sách bằng \`/album xem\`.`));
+                    return interaction.reply(buildAlbumDetailPayload(name, album));
+                }
+                const names = musicStore.getAlbumNames(user.id);
+                return interaction.reply({
+                    components: [buildAlbumListContainer(names, (n) => (musicStore.getAlbum(user.id, n) || []).length)],
+                    flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral
+                });
+            }
+
+            if (sub === 'tao') {
+                const res = musicStore.createAlbum(user.id, options.getString('tên'));
+                if (!res.ok) {
+                    const msg = res.reason === 'exists' ? 'Bạn đã có album trùng tên này rồi.' : 'Tên album không hợp lệ (không được để trống).';
+                    return interaction.reply(buildMusicNoticeEphemeral('Không tạo được album', msg, 0xF1C40F));
+                }
+                return interaction.reply(buildMusicNoticeEphemeral('Đã tạo album', `Album **${res.name}** đã sẵn sàng. Thêm bài bằng \`/album them tên:${res.name}\` khi đang nghe nhạc.`, 0x57F287));
+            }
+
+            if (sub === 'them') {
+                const name = options.getString('tên');
+                const mq = musicQueues.get(guild.id);
+                if (!mq || !mq.current) return interaction.reply(buildMusicNoticeEphemeral('Không có bài đang phát', 'Hãy phát một bài trước, rồi mới thêm vào album.'));
+                const res = musicStore.addToAlbum(user.id, name, mq.current);
+                if (!res.ok) {
+                    const msg = res.reason === 'no_album' ? `Bạn chưa có album tên **${name}**. Tạo bằng \`/album tao\` trước.`
+                        : res.reason === 'duplicate' ? 'Bài này đã có trong album rồi.'
+                        : 'Bài hát không hợp lệ.';
+                    return interaction.reply(buildMusicNoticeEphemeral('Không thêm được', msg, 0xF1C40F));
+                }
+                return interaction.reply(buildMusicNoticeEphemeral('Đã thêm vào album', `**${mq.current.title}** đã được lưu vào album **${name}**.`, 0x57F287));
+            }
+
+            if (sub === 'phat') {
+                const name = options.getString('tên');
+                const album = musicStore.getAlbum(user.id, name);
+                if (!album) return interaction.reply(buildMusicNoticeEphemeral('Không tìm thấy album', `Bạn chưa có album tên **${name}**.`));
+                const voiceChannel = member.voice?.channel;
+                if (!voiceChannel) return interaction.reply(buildMusicNoticeEphemeral('Bạn chưa vào kênh thoại', 'Hãy vào một kênh thoại trước khi phát album.'));
+                await interaction.deferReply({ ephemeral: true });
+                const res = await enqueueAlbum(guild, voiceChannel, interaction.channel, album, user.id);
+                if (!res.ok) return interaction.editReply({ content: res.error });
+                return interaction.editReply({
+                    content: res.playing
+                        ? `▶ Đang phát album **${name}** (**${res.count}** bài). Bắt đầu: **${res.playing}**.`
+                        : `✅ Đã thêm **${res.count}** bài từ album **${name}** vào hàng đợi.`
+                });
+            }
+
+            if (sub === 'xoa') {
+                const name = options.getString('tên');
+                const ok = musicStore.deleteAlbum(user.id, name);
+                if (!ok) return interaction.reply(buildMusicNoticeEphemeral('Không tìm thấy album', `Bạn chưa có album tên **${name}**.`, 0xF1C40F));
+                return interaction.reply(buildMusicNoticeEphemeral('Đã xóa album', `Album **${name}** đã được xóa khỏi thư viện của bạn.`, 0x99AAB5));
+            }
+        }
+
         if (commandName === 'queue') {
             const mq = musicQueues.get(guild.id);
             if (!mq || (!mq.current && mq.queue.length === 0)) {
@@ -7079,6 +7284,30 @@ client.on('interactionCreate', async interaction => {
             content: res.queued
                 ? `✅ Đã thêm **${res.title}** vào hàng đợi (vị trí #${res.position}).`
                 : `▶ Đang phát **${res.title}** từ album yêu thích của bạn.`
+        });
+    }
+
+    // ==========================================
+    // 📁 HANDLER SELECT MENU: PHÁT 1 BÀI TỪ ALBUM CÁ NHÂN
+    // ==========================================
+    if (interaction.isStringSelectMenu() && interaction.customId.startsWith('music_album_play_select:')) {
+        const albumName = decodeURIComponent(interaction.customId.split(':').slice(1).join(':'));
+        const voiceChannel = member.voice?.channel;
+        if (!voiceChannel) {
+            return interaction.reply(buildMusicNoticeEphemeral('Bạn chưa vào kênh thoại', 'Hãy vào một kênh thoại trước khi phát bài trong album.'));
+        }
+        const album = musicStore.getAlbum(user.id, albumName);
+        const idx = parseInt(interaction.values[0], 10);
+        if (!album || isNaN(idx) || idx < 0 || idx >= album.length) {
+            return interaction.reply(buildMusicNoticeEphemeral('Bài không còn trong album', 'Album có thể đã thay đổi. Hãy mở lại `/album xem`.'));
+        }
+        await interaction.deferReply({ ephemeral: true });
+        const res = await enqueueKnownTrack(guild, voiceChannel, interaction.channel, album[idx], user.id);
+        if (!res.ok) return interaction.editReply({ content: res.error });
+        return interaction.editReply({
+            content: res.queued
+                ? `✅ Đã thêm **${res.title}** vào hàng đợi (vị trí #${res.position}).`
+                : `▶ Đang phát **${res.title}** từ album **${albumName}**.`
         });
     }
 
