@@ -2569,7 +2569,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
 // Bot chỉ đăng 1 lần cho mỗi version (lưu ở config.lastUpdateAnnounced).
 // -----------------------------------------------------------------
 const UPDATE_CHANNEL_ID = '1527814721053655092';
-const UPDATE_VERSION = '2026.07.21.5';
+const UPDATE_VERSION = '2026.07.22';
 
 async function postUpdateAnnouncement() {
     if (config.lastUpdateAnnounced === UPDATE_VERSION) return; // Đã đăng bản này rồi
@@ -2593,9 +2593,10 @@ async function postUpdateAnnouncement() {
         )
         .addTextDisplayComponents(
             new TextDisplayBuilder().setContent(
-                `## Sửa lỗi âm thanh bị nhỏ/hụt\n` +
-                `- Khắc phục tình trạng nhạc **đang nghe bị nhỏ rồi lại bình thường** (do máy chủ tải nặng)\n` +
-                `- Bot giờ tải bản **audio gọn nhẹ** thay vì cả video, nhẹ máy hơn nhiều nên phát mượt hơn`
+                `## Ra mắt Website & Dashboard\n` +
+                `- Mimi giờ đã có **trang web riêng**: xem tính năng, bảng lệnh và trạng thái bot theo thời gian thực\n` +
+                `- **Dashboard đăng nhập bằng Discord**: quản trị viên xem và điều khiển trình phát nhạc của server ngay trên web\n` +
+                `- Số liệu trên web lấy **trực tiếp từ bot**, không phải con số dựng sẵn`
             )
         )
         .addSeparatorComponents(
@@ -2603,9 +2604,19 @@ async function postUpdateAnnouncement() {
         )
         .addTextDisplayComponents(
             new TextDisplayBuilder().setContent(
-                `## Ổn định hơn\n` +
-                `> Mặc định phát ở **âm lượng 100%** cho nhẹ máy, phát mượt.\n` +
-                `- Nút 🔊 Tăng / 🔉 Giảm vẫn dùng được bình thường (bài sẽ phát lại 1 nhịp khi chỉnh)`
+                `## Kết nối web ↔ bot an toàn\n` +
+                `> Web và bot nói chuyện qua **kênh nội bộ có xác thực token** — không mở cổng lung tung.\n` +
+                `- Nhạc, hàng chờ, chỉnh âm lượng trên web đồng bộ với Discord`
+            )
+        )
+        .addSeparatorComponents(
+            new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
+        )
+        .addTextDisplayComponents(
+            new TextDisplayBuilder().setContent(
+                `## Máy chủ hỗ trợ mới\n` +
+                `- Link máy chủ hỗ trợ đã đổi thành ${SUPPORT_LINK}\n` +
+                `- Mọi nút bấm và embed của bot đều đã cập nhật sang link mới`
             )
         )
         .addSeparatorComponents(
