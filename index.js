@@ -2195,10 +2195,11 @@ function buildMusicRows(mq) {
             new ButtonBuilder().setCustomId('music_queue').setLabel('Hàng đợi').setStyle(ButtonStyle.Secondary),
             new ButtonBuilder().setCustomId('music_fav').setLabel('❤ Yêu thích').setStyle(ButtonStyle.Success)
         ),
-        // Hàng 3: chế độ phát nâng cao — Autoplay radio + 24/7 (bật lên -> Success)
+        // Hàng 3: chế độ phát nâng cao — Autoplay radio + 24/7 + hiệu ứng (bật lên -> Success)
         new ActionRowBuilder().addComponents(
             new ButtonBuilder().setCustomId('music_autoplay').setLabel(mq.autoplay ? '📻 Autoplay: Bật' : '📻 Autoplay: Tắt').setStyle(mq.autoplay ? ButtonStyle.Success : ButtonStyle.Secondary),
-            new ButtonBuilder().setCustomId('music_247').setLabel(mq.stay247 ? '🔁 24/7: Bật' : '🔁 24/7: Tắt').setStyle(mq.stay247 ? ButtonStyle.Success : ButtonStyle.Secondary)
+            new ButtonBuilder().setCustomId('music_247').setLabel(mq.stay247 ? '🔁 24/7: Bật' : '🔁 24/7: Tắt').setStyle(mq.stay247 ? ButtonStyle.Success : ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId('music_effect').setLabel(mq.effect && mq.effect !== 'none' ? `🎚️ ${AUDIO_EFFECTS[mq.effect]?.label || 'Hiệu ứng'}` : '🎚️ Hiệu ứng').setStyle(mq.effect && mq.effect !== 'none' ? ButtonStyle.Success : ButtonStyle.Secondary)
         )
     ];
 }
@@ -2446,6 +2447,29 @@ function buildFavoritesPayload(favorites) {
         new StringSelectMenuBuilder()
             .setCustomId('music_fav_play_select')
             .setPlaceholder('▶ Chọn 1 bài yêu thích để phát...')
+            .addOptions(options)
+    );
+    return { components: [container, row], flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral };
+}
+
+// 🎚️ Payload chọn HIỆU ỨNG âm thanh (8 hiệu ứng + Tắt). currentKey = hiệu ứng đang áp để đánh dấu.
+function buildEffectsPayload(currentKey = 'none') {
+    const cur = AUDIO_EFFECTS[currentKey] ? currentKey : 'none';
+    const container = buildMusicNoticeContainer(
+        'Chọn hiệu ứng âm thanh',
+        `Hiệu ứng hiện tại: **${AUDIO_EFFECTS[cur].label}**.\n-# Đổi hiệu ứng sẽ **phát lại từ đúng vị trí đang nghe** (giữ nguyên tiến độ bài).`,
+        0x9B59B6
+    );
+    const options = Object.entries(AUDIO_EFFECTS).map(([key, ef]) =>
+        new StringSelectMenuOptionBuilder()
+            .setLabel(ef.label)
+            .setValue(key)
+            .setDefault(key === cur)
+    );
+    const row = new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+            .setCustomId('music_effect_select')
+            .setPlaceholder('🎚️ Chọn hiệu ứng âm thanh...')
             .addOptions(options)
     );
     return { components: [container, row], flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral };
@@ -5158,6 +5182,30 @@ client.on('messageCreate', async (message) => {
         );
     }
 
+    // 🎚️ Hiệu ứng âm thanh qua prefix: mihieuung / mifx [tên]. Không có tên -> mở menu chọn.
+    if (command === 'mihieuung' || command === 'mifx' || command === 'mieffect') {
+        const reply = (payload) => message.reply({ ...payload, allowedMentions: { repliedUser: false } }).catch(() => null);
+        const noticeV2 = (title, body, accent) => reply({ components: [buildMusicNoticeContainer(title, body, accent)], flags: MessageFlags.IsComponentsV2 });
+        const mq = musicQueues.get(message.guild.id);
+        if (!mq || !mq.current) return noticeV2('Chưa phát nhạc', 'Hãy phát một bài trước bằng `miplay <tên/link>`.', 0xF1C40F);
+        if (!canControlMusic(message.guild.id, message.member, mq)) {
+            return noticeV2('Bạn không có quyền', 'Chỉ **DJ**, quản trị viên hoặc người mở panel mới đổi hiệu ứng.', 0xF1C40F);
+        }
+        const rest = message.content.slice(args[0].length).trim().toLowerCase();
+        if (!rest) {
+            // Không tham số -> liệt kê hiệu ứng
+            const list = Object.entries(AUDIO_EFFECTS).map(([k, ef]) => `• \`${k}\` — ${ef.label}`).join('\n');
+            return noticeV2('Hiệu ứng âm thanh', `Hiện tại: **${AUDIO_EFFECTS[mq.effect || 'none'].label}**\n\n${list}\n\n-# Dùng: \`mifx bassboost\`, \`mifx none\` để tắt.`, 0x9B59B6);
+        }
+        if (!AUDIO_EFFECTS[rest]) {
+            return noticeV2('Không có hiệu ứng đó', `Các hiệu ứng: ${Object.keys(AUDIO_EFFECTS).map(k => `\`${k}\``).join(', ')}.`, 0xF1C40F);
+        }
+        const resumeSec = getPlaybackSec(mq);
+        await playNextTrack(message.guild.id, { replayCurrent: true, seekSec: resumeSec, effectKey: rest });
+        if (mq.nowPlayingMessage) mq.nowPlayingMessage.edit(buildMusicPayload(mq)).catch(() => null);
+        return noticeV2('Đã đổi hiệu ứng', `Đang áp **${AUDIO_EFFECTS[rest].label}** từ vị trí \`${formatDuration(resumeSec)}\`.`, 0x57F287);
+    }
+
     if (command === 'mialbum' || command === 'mial') {
         const rest = message.content.slice(args[0].length).trim();
         const spaceIdx = rest.indexOf(' ');
@@ -7584,6 +7632,29 @@ client.on('interactionCreate', async interaction => {
         }).catch(() => null);
     }
 
+    // 🎚️ CHỌN HIỆU ỨNG: phát lại chính bài hiện tại từ đúng vị trí đang nghe, áp filter mới.
+    if (interaction.isStringSelectMenu() && interaction.customId === 'music_effect_select') {
+        const mq = musicQueues.get(guild.id);
+        if (!mq || !mq.current) {
+            return interaction.update({ components: [buildMusicNoticeContainer('Không có bài đang phát', 'Bài đã kết thúc hoặc bot đã rời kênh.', 0x99AAB5)], flags: MessageFlags.IsComponentsV2 }).catch(() => null);
+        }
+        // Quyền: giống các nút điều khiển (DJ/owner/admin)
+        if (!canControlMusic(guild.id, member, mq)) {
+            return interaction.reply(buildOwnershipRejectPayload('Bạn không có quyền', 'Chỉ **DJ**, quản trị viên hoặc người mở panel mới đổi hiệu ứng.'));
+        }
+        const key = interaction.values[0];
+        if (!AUDIO_EFFECTS[key]) {
+            return interaction.update(buildEffectsPayload(mq.effect || 'none')).catch(() => null);
+        }
+        const resumeSec = getPlaybackSec(mq); // giữ nguyên tiến độ hiện tại
+        await interaction.update(buildEffectsPayload(key)).catch(() => null);
+        // Phát lại bài hiện tại từ resumeSec với hiệu ứng mới (đi qua ffmpeg).
+        await playNextTrack(guild.id, { replayCurrent: true, seekSec: resumeSec, effectKey: key });
+        // Cập nhật panel "Đang phát" để nhãn nút hiệu ứng đổi màu
+        if (mq.nowPlayingMessage) mq.nowPlayingMessage.edit(buildMusicPayload(mq)).catch(() => null);
+        return;
+    }
+
     // ==========================================
     // 📂 HANDLER SELECT MENU: PHÂN NHÁNH /HELP
     // ==========================================
@@ -7895,6 +7966,11 @@ client.on('interactionCreate', async interaction => {
                         : 'Bot sẽ **tự rời kênh** khi không còn ai nghe hoặc sau 2 phút hết bài.',
                     mq.stay247 ? 0x57F287 : 0x99AAB5
                 )).catch(() => null);
+            }
+
+            if (customId === 'music_effect') {
+                if (!mq.current) return interaction.reply(buildMusicNoticeEphemeral('Không có bài đang phát', 'Hãy phát một bài trước khi chọn hiệu ứng.'));
+                return interaction.reply(buildEffectsPayload(mq.effect || 'none'));
             }
 
             if (customId === 'music_pauseresume') {
