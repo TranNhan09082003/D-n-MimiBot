@@ -1991,8 +1991,24 @@ function toTrack(info) {
         title: info.title || 'Không rõ tiêu đề',
         url: info.webpage_url || info.original_url || `https://www.youtube.com/watch?v=${info.id}`,
         duration: Number(info.duration) || 0,
-        thumbnail: info.thumbnail || (Array.isArray(info.thumbnails) ? info.thumbnails[info.thumbnails.length - 1]?.url : null) || null
+        thumbnail: info.thumbnail || (Array.isArray(info.thumbnails) ? info.thumbnails[info.thumbnails.length - 1]?.url : null) || null,
+        // Nghệ sĩ/kênh + nguồn — hiển thị trong panel "Đang phát" cao cấp (không bắt buộc, có thì đẹp hơn)
+        author: info.uploader || info.channel || info.artist || info.creator || null,
+        source: prettySourceName(info.extractor_key || info.extractor || info.ie_key)
     };
+}
+
+// Đổi tên extractor kỹ thuật của yt-dlp thành tên nguồn dễ đọc để hiển thị trên panel.
+function prettySourceName(raw) {
+    if (!raw) return 'YouTube';
+    const s = String(raw).toLowerCase();
+    if (s.includes('youtube')) return 'YouTube';
+    if (s.includes('soundcloud')) return 'SoundCloud';
+    if (s.includes('bandcamp')) return 'Bandcamp';
+    if (s.includes('twitch')) return 'Twitch';
+    if (s.includes('vimeo')) return 'Vimeo';
+    if (s.includes('spotify')) return 'Spotify';
+    return raw;
 }
 
 // Tìm bài hát bằng yt-dlp: nếu là link YouTube hợp lệ thì lấy info trực tiếp,
@@ -2334,6 +2350,118 @@ function buildLyricsPayload(title, lyric, sourceNote = '') {
 const MUSIC_FALLBACK_THUMB = 'https://i.imgur.com/OaJ8Yqp.png';
 
 // =====================================================================
+// 🎨 GIAO DIỆN NHẠC CAO CẤP — bộ emoji nút bấm + thanh tiến trình dạng con trượt
+// ---------------------------------------------------------------------
+// MUSIC_EMOJI: mỗi nút điều khiển đọc emoji từ đây. MẶC ĐỊNH là emoji unicode (chạy được
+// ngay, mọi máy). Khi bot khởi động, provisionAppEmojis() sẽ TỰ tạo emoji ứng dụng riêng
+// cho bot (dùng được ở mọi server, không cần quyền Manage Emojis từng server) rồi GHI ĐÈ
+// các khóa dưới đây bằng chuỗi "<:tên:id>". Nếu tạo lỗi -> vẫn giữ unicode, không hỏng UI.
+// =====================================================================
+const MUSIC_EMOJI = {
+    play:       '▶️',
+    pause:      '⏸️',
+    skip:       '⏭️',
+    stop:       '⏹️',
+    loopOff:    '🔁',
+    loopTrack:  '🔂',
+    loopQueue:  '🔁',
+    voldown:    '🔉',
+    volup:      '🔊',
+    queue:      '📋',
+    fav:        '💖',
+    autoplay:   '📻',
+    stay247:    '♾️',
+    effect:     '🎛️',
+    lyrics:     '🎤',
+    seekback:   '⏪',
+    seekfwd:    '⏩',
+    restart:    '🔄',
+    shuffle:    '🔀',
+    clear:      '🗑️',
+    music:      '🎧',
+    disc:       '💿',
+    dot:        '•'
+};
+
+// Gán emoji cho nút một cách AN TOÀN: chấp nhận cả unicode ('▶️') lẫn custom ('<:tên:id>').
+// discord.js tự phân giải cả hai. Bọc try/catch để 1 emoji hỏng không làm sập cả panel.
+function applyBtnEmoji(button, key) {
+    const e = MUSIC_EMOJI[key];
+    if (!e) return button;
+    try { button.setEmoji(e); } catch { /* emoji không hợp lệ -> giữ nút không emoji */ }
+    return button;
+}
+
+// 🎨 Tự cấp Application Emoji cho MimiBot (không cần quyền ManageGuildExpressions ở từng server —
+// emoji gắn với chính APPLICATION nên hiện ở mọi server bot có mặt). Cơ chế:
+//   - Nếu trên HOST có thư mục assets/emojis/<key>.(png|gif|webp) thì upload làm Application Emoji,
+//     rồi ghi đè MUSIC_EMOJI[key] = '<:tên:id>' (hoặc '<a:tên:id>' cho gif động).
+//   - Emoji đã tồn tại (theo tên) thì DÙNG LẠI, không tạo trùng.
+//   - Không có ảnh -> giữ nguyên emoji unicode mặc định (giao diện vẫn đẹp).
+// Toàn bộ bọc try/catch: thất bại 1 emoji không được làm sập bot lúc khởi động.
+async function provisionAppEmojis() {
+    const dir = path.join(__dirname, 'assets', 'emojis');
+    let files;
+    try {
+        files = fs.readdirSync(dir);
+    } catch {
+        console.log('🎨 [Emoji] Không có assets/emojis — dùng emoji unicode mặc định.');
+        return;
+    }
+
+    // Map "key" (theo MUSIC_EMOJI) -> tên emoji hợp lệ trên Discord (2-32 ký tự, [a-z0-9_]).
+    const emojiName = (key) => `mimi_${key}`.toLowerCase().replace(/[^a-z0-9_]/g, '').slice(0, 32);
+
+    let appEmojis;
+    try {
+        // Nạp danh sách Application Emoji hiện có để tránh tạo trùng.
+        appEmojis = await client.application.emojis.fetch();
+    } catch (e) {
+        console.error('🎨 [Emoji] Không tải được danh sách Application Emoji:', e?.message);
+        return;
+    }
+    const byName = new Map();
+    for (const em of appEmojis.values()) byName.set(em.name, em);
+
+    let created = 0, reused = 0;
+    for (const key of Object.keys(MUSIC_EMOJI)) {
+        // Tìm file ảnh khớp key (ưu tiên gif động, rồi png/webp).
+        const match = files.find(f => {
+            const base = f.replace(/\.(png|gif|webp)$/i, '');
+            return base === key && /\.(png|gif|webp)$/i.test(f);
+        });
+        if (!match) continue;
+
+        const name = emojiName(key);
+        try {
+            let em = byName.get(name);
+            if (em) {
+                reused++;
+            } else {
+                const attachment = fs.readFileSync(path.join(dir, match));
+                em = await client.application.emojis.create({ attachment, name });
+                created++;
+            }
+            const animated = /\.gif$/i.test(match) || em.animated;
+            MUSIC_EMOJI[key] = `<${animated ? 'a' : ''}:${em.name}:${em.id}>`;
+        } catch (e) {
+            console.error(`🎨 [Emoji] Bỏ qua "${key}" (${match}):`, e?.message);
+        }
+    }
+    console.log(`🎨 [Emoji] Application Emoji: tạo mới ${created}, dùng lại ${reused}.`);
+}
+
+// Thanh tiến trình dạng CON TRƯỢT (giống player nhạc cao cấp): ▬▬▬🔘▬▬▬ với núm ở đúng vị trí.
+function buildMusicProgressBar(currentSec, totalSec, size = 14) {
+    if (!(totalSec > 0)) totalSec = 1;
+    const ratio = Math.max(0, Math.min(1, currentSec / totalSec));
+    const pos = Math.round(ratio * (size - 1)); // vị trí núm trượt (0..size-1)
+    let bar = '';
+    for (let i = 0; i < size; i++) bar += i === pos ? '🔘' : '▬';
+    return bar;
+}
+
+// =====================================================================
 // 🎚️ 8 HIỆU ỨNG ÂM THANH — bộ lọc ffmpeg (dùng khi phát qua đường ffmpeg)
 // ---------------------------------------------------------------------
 // Mỗi hiệu ứng là 1 chuỗi filter `-af` của ffmpeg. 'none' = không lọc (phát gốc).
@@ -2418,41 +2546,44 @@ function buildMusicRows(mq) {
         : 'Lặp: Hàng đợi';
     const loopStyle = mq.loop === 'off' ? ButtonStyle.Secondary : ButtonStyle.Success;
 
+    // Emoji nút Lặp đổi theo chế độ SẼ chuyển tới (giống player cao cấp: biểu tượng phản ánh trạng thái).
+    const loopEmojiKey = mq.loop === 'off' ? 'loopOff' : mq.loop === 'track' ? 'loopTrack' : 'loopQueue';
+
     return [
-        // Hàng 1: điều khiển phát
+        // Hàng 1: điều khiển phát chính
         new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId('music_pauseresume').setLabel(isPaused ? 'Tiếp tục' : 'Tạm dừng').setStyle(ButtonStyle.Primary),
-            new ButtonBuilder().setCustomId('music_skip').setLabel('Bỏ qua').setStyle(ButtonStyle.Secondary),
-            new ButtonBuilder().setCustomId('music_stop').setLabel('Dừng & Thoát').setStyle(ButtonStyle.Danger),
-            new ButtonBuilder().setCustomId('music_loop').setLabel(loopLabel).setStyle(loopStyle)
+            applyBtnEmoji(new ButtonBuilder().setCustomId('music_pauseresume').setLabel(isPaused ? 'Tiếp tục' : 'Tạm dừng').setStyle(ButtonStyle.Primary), isPaused ? 'play' : 'pause'),
+            applyBtnEmoji(new ButtonBuilder().setCustomId('music_skip').setLabel('Bỏ qua').setStyle(ButtonStyle.Secondary), 'skip'),
+            applyBtnEmoji(new ButtonBuilder().setCustomId('music_stop').setLabel('Dừng & Thoát').setStyle(ButtonStyle.Danger), 'stop'),
+            applyBtnEmoji(new ButtonBuilder().setCustomId('music_loop').setLabel(loopLabel).setStyle(loopStyle), loopEmojiKey)
         ),
         // Hàng 2: âm lượng + hàng đợi + tim yêu thích (tim là CÁ NHÂN mỗi người, ai cùng kênh cũng bấm được)
         new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId('music_voldown').setLabel('Giảm âm').setStyle(ButtonStyle.Secondary).setDisabled(mq.volume <= 0),
-            new ButtonBuilder().setCustomId('music_volup').setLabel('Tăng âm').setStyle(ButtonStyle.Secondary).setDisabled(mq.volume >= 1.5),
-            new ButtonBuilder().setCustomId('music_queue').setLabel('Hàng đợi').setStyle(ButtonStyle.Secondary),
-            new ButtonBuilder().setCustomId('music_fav').setLabel('❤ Yêu thích').setStyle(ButtonStyle.Success)
+            applyBtnEmoji(new ButtonBuilder().setCustomId('music_voldown').setLabel('Giảm âm').setStyle(ButtonStyle.Secondary).setDisabled(mq.volume <= 0), 'voldown'),
+            applyBtnEmoji(new ButtonBuilder().setCustomId('music_volup').setLabel('Tăng âm').setStyle(ButtonStyle.Secondary).setDisabled(mq.volume >= 1.5), 'volup'),
+            applyBtnEmoji(new ButtonBuilder().setCustomId('music_queue').setLabel('Hàng đợi').setStyle(ButtonStyle.Secondary), 'queue'),
+            applyBtnEmoji(new ButtonBuilder().setCustomId('music_fav').setLabel('Yêu thích').setStyle(ButtonStyle.Success), 'fav')
         ),
         // Hàng 3: chế độ phát nâng cao — Autoplay radio + 24/7 + hiệu ứng (bật lên -> Success)
         new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId('music_autoplay').setLabel(mq.autoplay ? '📻 Autoplay: Bật' : '📻 Autoplay: Tắt').setStyle(mq.autoplay ? ButtonStyle.Success : ButtonStyle.Secondary),
-            new ButtonBuilder().setCustomId('music_247').setLabel(mq.stay247 ? '🔁 24/7: Bật' : '🔁 24/7: Tắt').setStyle(mq.stay247 ? ButtonStyle.Success : ButtonStyle.Secondary),
-            new ButtonBuilder().setCustomId('music_effect').setLabel(mq.effect && mq.effect !== 'none' ? `🎚️ ${AUDIO_EFFECTS[mq.effect]?.label || 'Hiệu ứng'}` : '🎚️ Hiệu ứng').setStyle(mq.effect && mq.effect !== 'none' ? ButtonStyle.Success : ButtonStyle.Secondary),
-            new ButtonBuilder().setCustomId('music_lyrics').setLabel('🎤 Lời bài hát').setStyle(ButtonStyle.Secondary)
+            applyBtnEmoji(new ButtonBuilder().setCustomId('music_autoplay').setLabel(mq.autoplay ? 'Autoplay: Bật' : 'Autoplay: Tắt').setStyle(mq.autoplay ? ButtonStyle.Success : ButtonStyle.Secondary), 'autoplay'),
+            applyBtnEmoji(new ButtonBuilder().setCustomId('music_247').setLabel(mq.stay247 ? '24/7: Bật' : '24/7: Tắt').setStyle(mq.stay247 ? ButtonStyle.Success : ButtonStyle.Secondary), 'stay247'),
+            applyBtnEmoji(new ButtonBuilder().setCustomId('music_effect').setLabel(mq.effect && mq.effect !== 'none' ? `${AUDIO_EFFECTS[mq.effect]?.label || 'Hiệu ứng'}` : 'Hiệu ứng').setStyle(mq.effect && mq.effect !== 'none' ? ButtonStyle.Success : ButtonStyle.Secondary), 'effect'),
+            applyBtnEmoji(new ButtonBuilder().setCustomId('music_lyrics').setLabel('Lời bài hát').setStyle(ButtonStyle.Secondary), 'lyrics')
         ),
         // Hàng 4: tua nhanh + xáo trộn + phát lại từ đầu + xóa sạch hàng đợi
         new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId('music_seekback').setLabel('⏪ -10s').setStyle(ButtonStyle.Secondary),
-            new ButtonBuilder().setCustomId('music_seekfwd').setLabel('⏩ +10s').setStyle(ButtonStyle.Secondary),
-            new ButtonBuilder().setCustomId('music_restart').setLabel('↺ Phát lại').setStyle(ButtonStyle.Secondary),
-            new ButtonBuilder().setCustomId('music_shuffle').setLabel('🔀 Xáo trộn').setStyle(ButtonStyle.Secondary).setDisabled(mq.queue.length < 2),
-            new ButtonBuilder().setCustomId('music_clearqueue').setLabel('🗑 Xóa hàng đợi').setStyle(ButtonStyle.Danger).setDisabled(mq.queue.length === 0)
+            applyBtnEmoji(new ButtonBuilder().setCustomId('music_seekback').setLabel('-10s').setStyle(ButtonStyle.Secondary), 'seekback'),
+            applyBtnEmoji(new ButtonBuilder().setCustomId('music_seekfwd').setLabel('+10s').setStyle(ButtonStyle.Secondary), 'seekfwd'),
+            applyBtnEmoji(new ButtonBuilder().setCustomId('music_restart').setLabel('Phát lại').setStyle(ButtonStyle.Secondary), 'restart'),
+            applyBtnEmoji(new ButtonBuilder().setCustomId('music_shuffle').setLabel('Xáo trộn').setStyle(ButtonStyle.Secondary).setDisabled(mq.queue.length < 2), 'shuffle'),
+            applyBtnEmoji(new ButtonBuilder().setCustomId('music_clearqueue').setLabel('Xóa hàng đợi').setStyle(ButtonStyle.Danger).setDisabled(mq.queue.length === 0), 'clear')
         )
     ];
 }
 
-// Giao diện "Đang phát" dạng Components V2 — markdown đa dạng, KHÔNG emoji.
-// Gộp cả thông tin bài hát + thanh tiến trình + nút điều khiển vào 1 container.
+// Giao diện "Đang phát" dạng Components V2 — bố cục cao cấp: tiêu đề phân cấp, dòng nghệ sĩ/nguồn,
+// thanh tiến trình dạng con trượt, khối thông số dạng trích dẫn và 4 hàng nút có emoji.
 function buildMusicContainer(mq) {
     const track = mq.current;
     // Cộng seekBase: playbackDuration chỉ đếm thời gian resource HIỆN TẠI đã phát; khi tua (seek/khôi phục)
@@ -2460,21 +2591,44 @@ function buildMusicContainer(mq) {
     const played = mq.currentResource ? Math.floor(mq.currentResource.playbackDuration / 1000) : 0;
     const currentSecs = (mq.seekBase || 0) + played;
     const totalSecs = track.duration || 0;
-    const progressStr = `\`${formatDuration(currentSecs)}\` ${generateProgressBar(currentSecs, totalSecs)} \`${formatDuration(totalSecs)}\``;
-    const loopText = mq.loop === 'track' ? 'Bài hiện tại' : mq.loop === 'queue' ? 'Cả hàng đợi' : 'Tắt';
+
     const isPaused = mq.player.state.status === voiceLib.AudioPlayerStatus.Paused;
-    const statusText = isPaused ? 'Tạm dừng' : 'Đang phát';
+    const statusText = isPaused ? `${MUSIC_EMOJI.pause} Tạm dừng` : `${MUSIC_EMOJI.play} Đang phát`;
+    // Màu viền đổi theo trạng thái để nhận ra ngay: đang phát = xanh Discord, tạm dừng = vàng.
+    const accent = isPaused ? 0xF1C40F : 0x5865F2;
+
+    const loopText = mq.loop === 'track' ? 'Bài hiện tại' : mq.loop === 'queue' ? 'Cả hàng đợi' : 'Tắt';
+    const volPct = Math.round(mq.volume * 100);
+    const effectLabel = (mq.effect && mq.effect !== 'none') ? (AUDIO_EFFECTS[mq.effect]?.label || 'Có') : 'Tắt';
+
+    // Dòng phụ dưới tiêu đề: nghệ sĩ/kênh + nguồn (nếu biết) — kiểu player nhạc cao cấp.
+    const metaBits = [];
+    if (track.author) metaBits.push(`**${track.author}**`);
+    if (track.source) metaBits.push(track.source);
+    const metaLine = metaBits.length ? `-# ${MUSIC_EMOJI.disc} ${metaBits.join(` ${MUSIC_EMOJI.dot} `)}
+` : '';
 
     const headerText =
-        `## ${statusText}\n` +
-        `### [${track.title}](${track.url})\n` +
-        `-# Yêu cầu bởi ${track.requestedBy}`;
+        `## ${statusText}
+` +
+        `### [${track.title}](${track.url})
+` +
+        metaLine +
+        `-# ${MUSIC_EMOJI.music} Yêu cầu bởi ${track.requestedBy}`;
 
+    // Thanh tiến trình dạng con trượt + mốc thời gian hai đầu.
+    const progressStr =
+        `${buildMusicProgressBar(currentSecs, totalSecs)}
+` +
+        `\`${formatDuration(currentSecs)}\` \`${formatDuration(totalSecs)}\``;
+
+    // Khối thông số dạng trích dẫn, chia ô rõ ràng.
     const statsText =
-        `${progressStr}\n\n` +
-        `> **Âm lượng** \`${Math.round(mq.volume * 100)}%\` **Lặp lại** \`${loopText}\` **Hàng đợi** \`${mq.queue.length} bài\``;
+        `> ${MUSIC_EMOJI.volup} **Âm lượng** \`${volPct}%\` ${MUSIC_EMOJI.loopOff} **Lặp** \`${loopText}\`
+` +
+        `> ${MUSIC_EMOJI.effect} **Hiệu ứng** \`${effectLabel}\` ${MUSIC_EMOJI.queue} **Hàng đợi** \`${mq.queue.length} bài\``;
 
-    const container = new ContainerBuilder().setAccentColor(0x5865F2);
+    const container = new ContainerBuilder().setAccentColor(accent);
 
     // Thumbnail chỉ thêm khi có URL hợp lệ (tránh lỗi ThumbnailBuilder với null)
     container.addSectionComponents(
@@ -2485,6 +2639,7 @@ function buildMusicContainer(mq) {
 
     container
         .addSeparatorComponents(new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true))
+        .addTextDisplayComponents(new TextDisplayBuilder().setContent(progressStr))
         .addTextDisplayComponents(new TextDisplayBuilder().setContent(statsText))
         .addSeparatorComponents(new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true));
 
@@ -3674,6 +3829,8 @@ async function postUpdateAnnouncement() {
 // -----------------------------------------------------------------
 client.once('ready', async () => {
     console.log(`🤖 Bot ${client.user.tag} đã Online thành công!`);
+    // 🎨 Tự cấp Application Emoji cho panel nhạc (an toàn, không cần quyền server).
+    await provisionAppEmojis().catch(e => console.error('🎨 [Emoji] provisionAppEmojis lỗi:', e?.message));
     await syncChannels();
 
     // 🔌 Khởi động Internal API cho website (chỉ chạy nếu đã đặt MIMI_API_TOKEN)
