@@ -2512,6 +2512,18 @@ function canControlMusic(guildId, member, mq) {
     return true;
 }
 
+// Đếm số người nghe THẬT (không tính bot) trong kênh thoại bot đang phát.
+function countListeners(guild, mq) {
+    const vc = guild.channels.cache.get(mq.voiceChannelId);
+    if (!vc) return 0;
+    return vc.members.filter(m => !m.user.bot).size;
+}
+
+// Tính số phiếu cần để vote-skip: quá bán số người nghe (làm tròn lên), tối thiểu 2.
+function requiredSkipVotes(listeners) {
+    return Math.max(2, Math.ceil(listeners / 2));
+}
+
 // Tính vị trí đang phát (giây) của server: giây đã tua + thời gian resource đã phát.
 function getPlaybackSec(mq) {
     if (!mq) return 0;
@@ -2712,6 +2724,7 @@ async function playNextTrack(guildId, opts = {}) {
 
     if (mq.idleTimeout) { clearTimeout(mq.idleTimeout); mq.idleTimeout = null; }
     mq.current = next;
+    if (mq.skipVotes) mq.skipVotes.clear(); // reset phiếu bỏ qua khi sang bài mới
     mq.effect = effectKey;
     // seekBase = số giây đã "bỏ qua" ở đầu bài. Thanh tiến trình = seekBase + playbackDuration
     // (playbackDuration chỉ đếm thời gian ĐÃ phát của resource hiện tại, nên khi tua phải cộng bù).
@@ -2900,7 +2913,8 @@ async function getOrCreateMusicQueue(guild, voiceChannel, textChannel) {
         effect: 'none',         // hiệu ứng âm thanh đang áp (xem AUDIO_EFFECTS)
         seekBase: 0,            // giây đã tua tới của bài hiện tại (progress = seekBase + playbackDuration)
         autoplay: false,        // autoplay radio khi hết hàng đợi
-        stay247: false          // ở lại kênh 24/7, không auto-leave
+        stay247: false,         // ở lại kênh 24/7, không auto-leave
+        skipVotes: new Set()    // ID người đã bỏ phiếu bỏ qua bài hiện tại (reset mỗi khi chuyển bài)
     };
     musicQueues.set(guild.id, mq);
 
@@ -7709,6 +7723,36 @@ client.on('interactionCreate', async interaction => {
                 ));
             }
 
+            // ⏭️ VOTE-SKIP — xử lý TRƯỚC gate: người có quyền (DJ/owner/admin) skip NGAY; người thường
+            // được BỎ PHIẾU, đủ quá bán số người nghe mới skip. Chống 1 người phá nhạc của cả phòng.
+            if (customId === 'music_skip') {
+                if (canControlMusic(guild.id, member, mq)) {
+                    await interaction.deferUpdate().catch(() => null);
+                    killCurrentProcess(mq);
+                    mq.player.stop(); // Idle -> tự phát bài kế
+                    return;
+                }
+                // Người thường: bỏ phiếu
+                if (!mq.skipVotes) mq.skipVotes = new Set();
+                if (mq.skipVotes.has(user.id)) {
+                    return interaction.reply(buildMusicNoticeEphemeral('Bạn đã bỏ phiếu rồi', 'Chờ thêm người khác cùng bỏ phiếu để bỏ qua bài này.', 0xF1C40F));
+                }
+                mq.skipVotes.add(user.id);
+                const listeners = countListeners(guild, mq);
+                const need = requiredSkipVotes(listeners);
+                if (mq.skipVotes.size >= need) {
+                    await interaction.reply(buildMusicNoticeEphemeral('Đủ phiếu — bỏ qua bài', `Đã đủ **${mq.skipVotes.size}/${need}** phiếu. Đang chuyển bài...`, 0x57F287)).catch(() => null);
+                    killCurrentProcess(mq);
+                    mq.player.stop();
+                    return;
+                }
+                return interaction.reply(buildMusicNoticeEphemeral(
+                    'Đã ghi nhận phiếu bỏ qua',
+                    `Phiếu bỏ qua: **${mq.skipVotes.size}/${need}**.\n> Cần thêm **${need - mq.skipVotes.size}** phiếu nữa để bỏ qua **${mq.current.title}**.\n-# DJ hoặc người mở panel có thể bỏ qua ngay.`,
+                    0x5865F2
+                ));
+            }
+
             // 🔒 QUYỀN ĐIỀU KHIỂN: nếu server đặt DJ role -> DJ + admin + owner panel đều điều khiển được;
             // nếu KHÔNG đặt DJ role -> chỉ người MỞ panel (giữ hành vi cũ). Xem canControlMusic.
             if (!canControlMusic(guild.id, member, mq)) {
@@ -7725,12 +7769,7 @@ client.on('interactionCreate', async interaction => {
                 return interaction.update(buildMusicPayload(mq)).catch(() => null);
             }
 
-            if (customId === 'music_skip') {
-                await interaction.deferUpdate().catch(() => null);
-                killCurrentProcess(mq);
-                mq.player.stop(); // Chuyển player sang Idle -> tự động phát bài kế tiếp
-                return;
-            }
+            // (music_skip đã xử lý TRƯỚC gate — vote-skip)
 
             if (customId === 'music_stop') {
                 // Ghi nhớ bài cuối để hiển thị trong thông báo, rồi XÓA mq khỏi Map TRƯỚC.
