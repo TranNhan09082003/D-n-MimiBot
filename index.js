@@ -2091,6 +2091,31 @@ function spawnFfmpegAudio(inputStream, { seekSec = 0, effectKey = 'none' } = {})
     return ff;
 }
 
+// Chuyển chuỗi thời gian người dùng nhập thành số giây. Chấp nhận nhiều định dạng:
+//   "90" -> 90 | "1:30" -> 90 | "1:02:03" -> 3723 | "1m30s" -> 90 | "45s" -> 45 | "2m" -> 120
+// Trả về số giây (>=0) hoặc null nếu không phân tích được.
+function parseTimeToSeconds(input) {
+    if (input == null) return null;
+    const s = String(input).trim().toLowerCase();
+    if (!s) return null;
+    // Dạng hh:mm:ss / mm:ss
+    if (s.includes(':')) {
+        const parts = s.split(':').map(p => p.trim());
+        if (parts.some(p => p === '' || !/^\d+$/.test(p))) return null;
+        const nums = parts.map(Number);
+        let sec = 0;
+        for (const n of nums) sec = sec * 60 + n;
+        return sec;
+    }
+    // Dạng 1m30s / 2m / 45s / 90
+    const m = s.match(/^(?:(\d+)\s*m)?\s*(?:(\d+)\s*s)?$/);
+    if (m && (m[1] || m[2])) {
+        return (parseInt(m[1] || '0', 10) * 60) + parseInt(m[2] || '0', 10);
+    }
+    if (/^\d+$/.test(s)) return parseInt(s, 10);
+    return null;
+}
+
 // Hàng nút điều khiển nhạc (Components V2 — KHÔNG dùng emoji cho gọn/đẹp theo yêu cầu).
 // customId nhúng ownerId của người mở panel để phần xử lý nút biết ai được phép thao tác.
 function buildMusicRows(mq) {
@@ -2461,6 +2486,20 @@ async function restoreMusicSessions() {
 
 // Phát bài tiếp theo trong hàng đợi (tự động gọi khi player Idle hoặc khi bắt đầu /play)
 // opts:
+// Tua bài đang phát tới giây targetSec (dùng chung cho slash /sek và prefix misek).
+// Trả về { ok, error } — error là chuỗi tiếng Việt để hiển thị cho người dùng.
+async function sekCurrentTrack(guildId, targetSec) {
+    const mq = musicQueues.get(guildId);
+    if (!mq || !mq.current) return { ok: false, error: '❌ Hiện **không có bài nào** đang phát để tua.' };
+    const total = mq.current.duration || 0;
+    if (total > 0 && targetSec >= total) {
+        return { ok: false, error: `❌ Mốc tua vượt quá độ dài bài (**${formatDuration(total)}**). Hãy chọn thời điểm nhỏ hơn.` };
+    }
+    // Phát lại chính bài hiện tại từ giây yêu cầu, giữ nguyên hiệu ứng đang áp.
+    await playNextTrack(guildId, { replayCurrent: true, seekSec: targetSec, effectKey: mq.effect || 'none' });
+    return { ok: true };
+}
+
 //   • seekSec  — bắt đầu phát từ giây này (khôi phục phiên / lệnh /sek). >0 -> đi qua ffmpeg.
 //   • effectKey — khóa hiệu ứng trong AUDIO_EFFECTS ('none' = không lọc). khác 'none' -> đi qua ffmpeg.
 //   • replayCurrent — phát LẠI mq.current thay vì lấy bài kế (dùng cho seek / đổi hiệu ứng giữa bài).
@@ -3457,6 +3496,11 @@ client.once('ready', async () => {
         new SlashCommandBuilder()
             .setName('queue')
             .setDescription('Xem danh sách hàng đợi nhạc hiện tại của server'),
+
+        new SlashCommandBuilder()
+            .setName('sek')
+            .setDescription('Tua bài đang phát tới mốc thời gian bất kỳ (vd: 90 hoặc 1:30 hoặc 1m30s)')
+            .addStringOption(o => o.setName('thời_điểm').setDescription('Giây (90) hoặc phút:giây (1:30) hoặc 1m30s').setRequired(true)),
 
         new SlashCommandBuilder()
             .setName('help')
@@ -4767,6 +4811,24 @@ client.on('messageCreate', async (message) => {
     }
 
     // 8. Lệnh phát nhạc bằng prefix: miplay hoặc mipl [tên bài hát / link YouTube]
+    if (command === 'misek' || command === 'miseek' || command === 'mitua') {
+        const mq = musicQueues.get(message.guild.id);
+        if (!mq || !mq.current) {
+            return message.reply({ content: '❌ Hiện **không có bài nào** đang phát để tua.', allowedMentions: { repliedUser: false } });
+        }
+        if (message.member.voice?.channel?.id !== mq.voiceChannelId) {
+            return message.reply({ content: '❌ Bạn cần **ở cùng kênh thoại** với bot để tua bài.', allowedMentions: { repliedUser: false } });
+        }
+        const raw = message.content.slice(args[0].length).trim();
+        const targetSec = parseTimeToSeconds(raw);
+        if (targetSec == null) {
+            return message.reply({ content: `❌ Định dạng thời gian không hợp lệ.\nVí dụ: \`${command} 90\`, \`${command} 1:30\`, \`${command} 1m30s\`.`, allowedMentions: { repliedUser: false } });
+        }
+        const res = await sekCurrentTrack(message.guild.id, targetSec);
+        if (!res.ok) return message.reply({ content: res.error, allowedMentions: { repliedUser: false } });
+        return message.reply({ content: `⏩ Đã tua tới **${formatDuration(targetSec)}**.`, allowedMentions: { repliedUser: false } });
+    }
+
     if (command === 'miplay' || command === 'mipl') {
         if (!isMusicReady()) {
             return message.reply({
@@ -6874,6 +6936,26 @@ client.on('interactionCreate', async interaction => {
                 if (statusMsg) mq.nowPlayingMessage = statusMsg;
                 await playNextTrack(guild.id);
             }
+        }
+
+        if (commandName === 'sek') {
+            const mq = musicQueues.get(guild.id);
+            // Chỉ người mở panel (ownerId) và đang cùng kênh thoại mới được tua
+            if (!mq || !mq.current) {
+                return interaction.reply(buildMusicNoticeEphemeral('Không có bài nào đang phát', 'Hãy phát một bài trước khi dùng lệnh tua.'));
+            }
+            if (mq.ownerId && member.voice?.channel?.id !== mq.voiceChannelId) {
+                return interaction.reply(buildMusicNoticeEphemeral('Không thể tua', 'Bạn cần **ở cùng kênh thoại** với bot để tua bài.'));
+            }
+            const raw = options.getString('thời_điểm');
+            const targetSec = parseTimeToSeconds(raw);
+            if (targetSec == null) {
+                return interaction.reply(buildMusicNoticeEphemeral('Định dạng thời gian không hợp lệ', 'Ví dụ hợp lệ: `90`, `1:30`, `1m30s`, `2m`.'));
+            }
+            await interaction.deferReply({ ephemeral: true });
+            const res = await sekCurrentTrack(guild.id, targetSec);
+            if (!res.ok) return interaction.editReply({ content: res.error });
+            return interaction.editReply({ content: `⏩ Đã tua tới **${formatDuration(targetSec)}**.` });
         }
 
         if (commandName === 'queue') {
