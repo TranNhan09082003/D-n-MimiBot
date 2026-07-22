@@ -12,6 +12,11 @@ const https = require('https');
 const { PassThrough, Readable } = require('stream');
 const { colors, buildBaseEmbed, generateProgressBar } = require('./uiBuilder');
 const { startInternalApi } = require('./internalApi');
+const { MusicStore } = require('./musicStore');
+
+// 🎵 Kho lưu trữ nhạc (phiên phát để khôi phục sau restart + Favorites/Album + cấu hình DJ mỗi server).
+// Dữ liệu ghi ra các file *.json trong thư mục bot (đã .gitignore + .sftpignore, không commit/deploy đè).
+const musicStore = new MusicStore(__dirname);
 
 // -----------------------------------------------------------------
 // 🕐 HELPER MÚI GIỜ VIỆT NAM CỐ ĐỊNH (UTC+7)

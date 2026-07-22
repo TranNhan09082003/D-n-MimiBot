@@ -3,6 +3,9 @@ config.json
 economy.json
 tickets.json
 created_channels.json
+music_sessions.json
+music_library.json
+music_guild_config.json
 *.tmp
 *.log
 .env
