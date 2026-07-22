@@ -2038,6 +2038,60 @@ async function searchYoutube(query) {
     return null; // Không còn kết quả nào phát được (toàn bộ đều bị chặn hoặc không tìm thấy)
 }
 
+// Trích ID video (11 ký tự) từ 1 URL YouTube; null nếu không phải link YouTube nhận dạng được.
+function extractYoutubeId(rawUrl) {
+    const input = String(rawUrl || '').trim();
+    try {
+        const u = new URL(input);
+        const host = u.hostname.replace(/^www\.|^m\./i, '').toLowerCase();
+        let id = null;
+        if (host === 'youtu.be') id = u.pathname.split('/').filter(Boolean)[0] || null;
+        else if (host === 'youtube.com' || host === 'music.youtube.com') {
+            if (u.pathname === '/watch') id = u.searchParams.get('v');
+            else if (u.pathname.startsWith('/shorts/') || u.pathname.startsWith('/embed/') || u.pathname.startsWith('/live/')) {
+                id = u.pathname.split('/').filter(Boolean)[1] || null;
+            }
+        }
+        return (id && /^[a-zA-Z0-9_-]{11}$/.test(id)) ? id : null;
+    } catch { return null; }
+}
+
+// 📻 AUTOPLAY RADIO: dựa trên bài vừa phát, lấy danh sách "YouTube Mix" (playlist RD<id>)
+// rồi chọn bài ĐẦU TIÊN chưa từng phát trong phiên. Trả về track hoặc null nếu không tìm được.
+// `playedUrls` là Set các url đã phát để tránh lặp lại vòng tròn.
+async function findRadioTrack(seedTrack, playedUrls) {
+    if (!seedTrack) return null;
+    const seedId = extractYoutubeId(seedTrack.url);
+    if (!seedId) return null; // Chỉ hỗ trợ radio cho nguồn YouTube (nguồn khác bỏ qua an toàn)
+    const mixUrl = `https://www.youtube.com/watch?v=${seedId}&list=RD${seedId}`;
+    let raw;
+    try {
+        raw = await ytDlpExec(mixUrl, {
+            dumpSingleJson: true,
+            flatPlaylist: true,   // chỉ lấy metadata nhẹ (id/title), không trích stream từng bài
+            skipDownload: true,
+            playlistItems: '1-25',
+            ignoreErrors: true,
+            ...YT_COMMON_OPTS
+        });
+    } catch { return null; }
+    const entries = raw?.entries ? raw.entries : [];
+    for (const e of entries) {
+        const vid = e?.id;
+        if (!vid || !/^[a-zA-Z0-9_-]{11}$/.test(vid)) continue;
+        if (vid === seedId) continue; // bỏ chính bài gốc
+        const url = `https://www.youtube.com/watch?v=${vid}`;
+        if (playedUrls && playedUrls.has(url)) continue; // đã phát rồi -> bỏ để không lặp
+        return {
+            title: e.title || 'Không rõ tiêu đề',
+            url,
+            duration: Number(e.duration) || 0,
+            thumbnail: (Array.isArray(e.thumbnails) ? e.thumbnails[e.thumbnails.length - 1]?.url : null) || `https://i.ytimg.com/vi/${vid}/hqdefault.jpg`
+        };
+    }
+    return null;
+}
+
 // Ảnh dự phòng khi bài hát không có thumbnail (ThumbnailBuilder yêu cầu URL hợp lệ, null sẽ lỗi)
 const MUSIC_FALLBACK_THUMB = 'https://i.imgur.com/OaJ8Yqp.png';
 
@@ -2140,6 +2194,11 @@ function buildMusicRows(mq) {
             new ButtonBuilder().setCustomId('music_volup').setLabel('Tăng âm').setStyle(ButtonStyle.Secondary).setDisabled(mq.volume >= 1.5),
             new ButtonBuilder().setCustomId('music_queue').setLabel('Hàng đợi').setStyle(ButtonStyle.Secondary),
             new ButtonBuilder().setCustomId('music_fav').setLabel('❤ Yêu thích').setStyle(ButtonStyle.Success)
+        ),
+        // Hàng 3: chế độ phát nâng cao — Autoplay radio + 24/7 (bật lên -> Success)
+        new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('music_autoplay').setLabel(mq.autoplay ? '📻 Autoplay: Bật' : '📻 Autoplay: Tắt').setStyle(mq.autoplay ? ButtonStyle.Success : ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId('music_247').setLabel(mq.stay247 ? '🔁 24/7: Bật' : '🔁 24/7: Tắt').setStyle(mq.stay247 ? ButtonStyle.Success : ButtonStyle.Secondary)
         )
     ];
 }
@@ -2698,6 +2757,17 @@ async function playNextTrack(guildId, opts = {}) {
         next = mq.queue.shift();
     }
 
+    // 📻 AUTOPLAY RADIO: hết hàng đợi mà autoplay đang bật -> tự tìm bài liên quan để phát tiếp.
+    if (!next && mq.autoplay && !opts.replayCurrent) {
+        const seed = mq.lastSeed || mq.current;
+        const radioTrack = await findRadioTrack(seed, mq.playedUrls);
+        if (radioTrack) {
+            radioTrack.requestedBy = '📻 Autoplay (radio)'; // bài do radio tự chọn
+            radioTrack.autoplayed = true;
+            next = radioTrack;
+        }
+    }
+
     if (!next) {
         // Vô hiệu hóa nút ở tin "Đang phát" cũ (V2: thay bằng container thông báo không nút)
         mq.current = null;
@@ -2724,6 +2794,10 @@ async function playNextTrack(guildId, opts = {}) {
 
     if (mq.idleTimeout) { clearTimeout(mq.idleTimeout); mq.idleTimeout = null; }
     mq.current = next;
+    // Ghi nhớ url đã phát để autoplay không lặp; seed radio chỉ lấy từ bài NGƯỜI DÙNG chọn
+    // (bài autoplayed không cập nhật seed) để "đài" luôn bám sở thích gốc.
+    if (next.url) { if (!mq.playedUrls) mq.playedUrls = new Set(); mq.playedUrls.add(next.url); }
+    if (!next.autoplayed) mq.lastSeed = next;
     if (mq.skipVotes) mq.skipVotes.clear(); // reset phiếu bỏ qua khi sang bài mới
     mq.effect = effectKey;
     // seekBase = số giây đã "bỏ qua" ở đầu bài. Thanh tiến trình = seekBase + playbackDuration
@@ -2914,7 +2988,9 @@ async function getOrCreateMusicQueue(guild, voiceChannel, textChannel) {
         seekBase: 0,            // giây đã tua tới của bài hiện tại (progress = seekBase + playbackDuration)
         autoplay: false,        // autoplay radio khi hết hàng đợi
         stay247: false,         // ở lại kênh 24/7, không auto-leave
-        skipVotes: new Set()    // ID người đã bỏ phiếu bỏ qua bài hiện tại (reset mỗi khi chuyển bài)
+        skipVotes: new Set(),   // ID người đã bỏ phiếu bỏ qua bài hiện tại (reset mỗi khi chuyển bài)
+        lastSeed: null,         // track gốc để tạo radio khi autoplay (bài người dùng phát gần nhất)
+        playedUrls: new Set()   // url đã phát trong phiên — tránh autoplay lặp vòng tròn
     };
     musicQueues.set(guild.id, mq);
 
@@ -5050,6 +5126,36 @@ client.on('messageCreate', async (message) => {
             return noticeV2('Đã đặt âm lượng mặc định', `Các bài phát mới sẽ bắt đầu ở **${pct}%**.`, 0x57F287);
         }
         return noticeV2('Lệnh DJ không hợp lệ', 'Các lệnh: `xem`, `role @role` / `role off`, `amluong <0-150>`.', 0xF1C40F);
+    }
+
+    // 📻 Autoplay radio & 🔁 24/7 qua prefix (đồng nhất với nút panel)
+    if (command === 'miautoplay' || command === 'miradio' || command === 'mi247' || command === 'mistay') {
+        const noticeV2 = (title, body, accent) => message.reply({ components: [buildMusicNoticeContainer(title, body, accent)], flags: MessageFlags.IsComponentsV2, allowedMentions: { repliedUser: false } }).catch(() => null);
+        const mq = musicQueues.get(message.guild.id);
+        if (!mq) return noticeV2('Chưa phát nhạc', 'Hãy phát một bài trước bằng `miplay <tên/link>`.', 0xF1C40F);
+        if (!canControlMusic(message.guild.id, message.member, mq)) {
+            return noticeV2('Bạn không có quyền', 'Chỉ **DJ**, quản trị viên hoặc người mở panel mới đổi chế độ phát.', 0xF1C40F);
+        }
+        if (command === 'miautoplay' || command === 'miradio') {
+            mq.autoplay = !mq.autoplay;
+            if (mq.autoplay && !mq.lastSeed && mq.current) mq.lastSeed = mq.current;
+            persistSession(message.guild.id);
+            if (mq.nowPlayingMessage) mq.nowPlayingMessage.edit(buildMusicPayload(mq)).catch(() => null);
+            return noticeV2(
+                mq.autoplay ? 'Đã bật Autoplay radio' : 'Đã tắt Autoplay radio',
+                mq.autoplay ? 'Hết hàng đợi bot sẽ **tự phát bài liên quan**.' : 'Bot sẽ **dừng** khi hết hàng đợi.',
+                mq.autoplay ? 0x57F287 : 0x99AAB5
+            );
+        }
+        // mi247 / mistay
+        mq.stay247 = !mq.stay247;
+        persistSession(message.guild.id);
+        if (mq.nowPlayingMessage) mq.nowPlayingMessage.edit(buildMusicPayload(mq)).catch(() => null);
+        return noticeV2(
+            mq.stay247 ? 'Đã bật chế độ 24/7' : 'Đã tắt chế độ 24/7',
+            mq.stay247 ? 'Bot **ở lại kênh** dù không còn ai nghe hoặc hết bài.' : 'Bot **tự rời kênh** khi không còn ai nghe hoặc sau 2 phút hết bài.',
+            mq.stay247 ? 0x57F287 : 0x99AAB5
+        );
     }
 
     if (command === 'mialbum' || command === 'mial') {
@@ -7761,6 +7867,34 @@ client.on('interactionCreate', async interaction => {
                     ? `Server này đã đặt **DJ role** (<@&${cfg.djRoleId}>).\n> Chỉ **DJ**, quản trị viên, hoặc <@${mq.ownerId}> mới điều khiển được.`
                     : `Bảng điều khiển nhạc này do <@${mq.ownerId}> mở.\n> Chỉ **người mở panel** mới được bấm các nút điều khiển.`;
                 return interaction.reply(buildOwnershipRejectPayload('Bạn không có quyền điều khiển', reason + `\n\n-# Bạn có thể tự mở panel riêng bằng lệnh \`/play\` hoặc \`miplay\`.`));
+            }
+
+            if (customId === 'music_autoplay') {
+                mq.autoplay = !mq.autoplay;
+                // Bật autoplay giữa lúc còn bài -> chưa cần làm gì; khi hết queue playNextTrack sẽ tự tìm radio.
+                if (mq.autoplay && !mq.lastSeed && mq.current) mq.lastSeed = mq.current;
+                persistSession(guild.id); // lưu để khôi phục đúng trạng thái sau restart
+                await interaction.update(buildMusicPayload(mq)).catch(() => null);
+                return interaction.followUp(buildMusicNoticeEphemeral(
+                    mq.autoplay ? 'Đã bật Autoplay radio' : 'Đã tắt Autoplay radio',
+                    mq.autoplay
+                        ? 'Khi hết hàng đợi, bot sẽ **tự phát các bài liên quan** dựa trên bài bạn đang nghe.'
+                        : 'Bot sẽ **dừng** khi hết hàng đợi (không tự phát thêm).',
+                    mq.autoplay ? 0x57F287 : 0x99AAB5
+                )).catch(() => null);
+            }
+
+            if (customId === 'music_247') {
+                mq.stay247 = !mq.stay247;
+                persistSession(guild.id); // lưu để khôi phục đúng trạng thái sau restart
+                await interaction.update(buildMusicPayload(mq)).catch(() => null);
+                return interaction.followUp(buildMusicNoticeEphemeral(
+                    mq.stay247 ? 'Đã bật chế độ 24/7' : 'Đã tắt chế độ 24/7',
+                    mq.stay247
+                        ? 'Bot sẽ **ở lại kênh thoại** kể cả khi không còn ai nghe hoặc hết bài.'
+                        : 'Bot sẽ **tự rời kênh** khi không còn ai nghe hoặc sau 2 phút hết bài.',
+                    mq.stay247 ? 0x57F287 : 0x99AAB5
+                )).catch(() => null);
             }
 
             if (customId === 'music_pauseresume') {
