@@ -1965,6 +1965,17 @@ const YT_EXTRACTOR_ARGS = 'youtube:player_client=android,ios,web';
 //   - Client android_vr CÓ audio-only opus ~4MB VÀ tải được, KHÔNG 403 -> nhẹ nhất, hết hụt tiếng.
 // KHÔNG dùng android_vr cho tìm kiếm vì nó làm lệnh search chậm hẳn (tải VR player API mỗi video).
 const YT_DOWNLOAD_EXTRACTOR_ARGS = 'youtube:player_client=android_vr,android,ios,web';
+// 🔁 CHUỖI CLIENT DỰ PHÒNG KHI TẢI BỊ 403: YouTube liên tục chặn/xoay client nên KHÔNG client nào
+// "luôn đúng". Khi tải data bị 403 (dù đã lấy được URL), ta THỬ LẠI cùng bài với bộ client KHÁC theo
+// thứ tự dưới đây trước khi coi bài là lỗi. Mỗi phần tử là một cách ép player_client khác nhau:
+//   [0] android_vr trước (audio-only opus nhẹ) — mặc định, chạy tốt phần lớn thời gian.
+//   [1] tv/mweb/web_safari — nhóm client hay dùng được khi android bị siết (không cần po_token).
+//   [2] web/android/ios — phương án cuối, đôi khi web lại tải được khi các client kia hỏng.
+const YT_DOWNLOAD_CLIENT_FALLBACKS = [
+    'youtube:player_client=android_vr,android,ios,web',
+    'youtube:player_client=tv,mweb,web_safari',
+    'youtube:player_client=web,android,ios',
+];
 // Option dùng chung cho các lệnh yt-dlp lấy metadata (tìm kiếm / đọc info)
 const YT_COMMON_OPTS = {
     noWarnings: true,
@@ -3212,6 +3223,9 @@ async function playNextTrack(guildId, opts = {}) {
 
     const seekSec = Math.max(0, Math.floor(opts.seekSec || 0));
     const effectKey = opts.effectKey || mq.effect || 'none';
+    // Lần thử client (0 = bộ mặc định). Khi tải bị 403, ta gọi lại chính bài này với clientAttempt+1
+    // để đổi sang bộ player_client khác (xem YT_DOWNLOAD_CLIENT_FALLBACKS + nhánh catch 403 bên dưới).
+    const clientAttempt = Math.max(0, Math.floor(opts.clientAttempt || 0));
 
     // 🔒 Chống race "đổi hiệu ứng làm bot tự ngắt": mỗi lần gọi tạo 1 "thế hệ" mới. Bật cờ transitioning
     // để listener Idle bỏ qua sự kiện Idle "ảo" mà killCurrentProcess sắp gây ra (do hủy buffer bài đang
@@ -3304,11 +3318,10 @@ async function playNextTrack(guildId, opts = {}) {
             noWarnings: true,
             noCheckCertificates: true,
             quiet: true,
-            // 🛡️ Chống 403 + NHẸ CPU: ưu tiên client android_vr (có audio-only opus ~4MB, tải
-            // được không 403), rồi android/ios/web dự phòng. Tránh phải tải video muxed 14MB
-            // rồi ffmpeg tách audio — chính là nguyên nhân âm thanh bị nhỏ/hụt rồi lại bình thường.
+            // 🛡️ Chống 403 + NHẸ CPU: dùng bộ client theo lần thử (clientAttempt). Lần đầu android_vr
+            // (audio-only opus ~4MB), nếu tải bị 403 sẽ THỬ LẠI với bộ client khác (xem catch bên dưới).
             // KHÔNG đặt User-Agent giả app điện thoại (thừa, và làm hỏng chức năng tìm kiếm).
-            extractorArgs: YT_DOWNLOAD_EXTRACTOR_ARGS,
+            extractorArgs: YT_DOWNLOAD_CLIENT_FALLBACKS[clientAttempt] || YT_DOWNLOAD_EXTRACTOR_ARGS,
             // Đệm sẵn dữ liệu ở phía yt-dlp trước khi đẩy ra stdout, giúp stream ổn định hơn
             bufferSize: '16K'
         }, { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -3322,9 +3335,28 @@ async function playNextTrack(guildId, opts = {}) {
         // Bắt lỗi khi tiến trình yt-dlp thoát bất thường (đây là lỗi BẤT ĐỒNG BỘ,
         // không được try/catch phía trên bắt được — phải lắng nghe riêng như thế này)
         ytdlProcess.catch((err) => {
-            if (mq.current !== next) return; // đã chuyển bài khác, bỏ qua lỗi cũ
-            console.error(`❌ [Music] yt-dlp lỗi khi phát "${next.title}" ở server ${guildId}:`, stderrBuffer || err.message);
-            const shortErr = (stderrBuffer.split('\n').filter(Boolean).pop() || err.message || 'Không rõ lỗi').slice(0, 300);
+            if (mq.current !== next || mq.playGeneration !== genId) return; // đã chuyển bài / thế hệ khác
+            const rawErr = stderrBuffer || err.message || '';
+            console.error(`❌ [Music] yt-dlp lỗi khi phát "${next.title}" ở server ${guildId}:`, rawErr);
+
+            // 🔁 Lỗi 403 (YouTube chặn client đang dùng để TẢI data): thử lại CHÍNH bài này với bộ
+            // player_client kế tiếp trước khi coi là lỗi. YouTube xoay client liên tục nên client nào cũng
+            // có lúc bị chặn — đổi client thường phát lại được ngay mà không cần bỏ bài / báo lỗi cho user.
+            const is403 = /403|forbidden/i.test(rawErr);
+            const nextAttempt = clientAttempt + 1;
+            if (is403 && nextAttempt < YT_DOWNLOAD_CLIENT_FALLBACKS.length) {
+                console.warn(`🔁 [Music] 403 với client #${clientAttempt} — thử lại "${next.title}" bằng bộ client #${nextAttempt}.`);
+                // replayCurrent giữ nguyên bài + vị trí tua + hiệu ứng; chỉ đổi clientAttempt.
+                playNextTrack(guildId, {
+                    replayCurrent: true,
+                    seekSec,
+                    effectKey,
+                    clientAttempt: nextAttempt
+                }).catch(e => console.error(`❌ [Music] Lỗi khi thử lại client cho "${next.title}":`, e?.message || e));
+                return;
+            }
+
+            const shortErr = (rawErr.split('\n').filter(Boolean).pop() || 'Không rõ lỗi').slice(0, 300);
             handlePlaybackFailure(guildId, mq, next, shortErr);
         });
 
