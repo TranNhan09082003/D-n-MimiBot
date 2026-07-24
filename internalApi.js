@@ -121,7 +121,9 @@ function startInternalApi(deps) {
         ]
     } = deps;
 
-    const TOKEN = (process.env.MIMI_API_TOKEN || '').trim();
+    // Token: ưu tiên env MIMI_API_TOKEN; nếu panel không inject env thì lấy
+    // từ config.json (config.mimiApiToken) — file này bot chắc chắn đọc được.
+    const TOKEN = (process.env.MIMI_API_TOKEN || config?.mimiApiToken || '').trim();
     // Ưu tiên MIMI_API_PORT (đặt thủ công). Nếu trống, dùng port Pterodactyl/VibeHost
     // cấp qua SERVER_PORT (bot Discord không cần port inbound nên port này đang rảnh).
     const PORT = Number(process.env.MIMI_API_PORT || process.env.SERVER_PORT || 8787);
@@ -130,7 +132,8 @@ function startInternalApi(deps) {
     const HOST = process.env.MIMI_API_HOST || process.env.SERVER_IP || '0.0.0.0';
 
     if (!TOKEN) {
-        logger.warn('⚠️ [InternalAPI] Chưa đặt MIMI_API_TOKEN — API nội bộ sẽ KHÔNG khởi động (an toàn: tránh mở cổng không xác thực).');
+        logger.warn('⚠️ [InternalAPI] Chưa đặt token — API nội bộ sẽ KHÔNG khởi động (an toàn: tránh mở cổng không xác thực).');
+        logger.warn('   → Đặt token bằng 1 trong 2 cách: (a) biến môi trường MIMI_API_TOKEN trên panel, hoặc (b) thêm "mimiApiToken": "<token>" vào config.json.');
         return null;
     }
 
