@@ -6845,10 +6845,20 @@ client.on('interactionCreate', async interaction => {
                 return interaction.editReply({ content: `❌ Bot không có quyền **Xem** hoặc **Gửi tin** trong ${targetChannel}.` });
             }
 
+            // Kiểm tra quyền ping @everyone TRƯỚC khi build (tránh dựng xong mới báo lỗi).
+            if (pingEveryone && !member.permissions?.has(PermissionFlagsBits.MentionEveryone) && !member.permissions?.has(PermissionFlagsBits.Administrator)) {
+                return interaction.editReply({ content: '❌ Bạn cần quyền **Nhắc mọi người (@everyone)** để bật tùy chọn này.' });
+            }
+
             // Tách các MỤC bằng dấu "|". Mỗi mục: "Tiêu đề mục :: nội dung" (không có "::" -> mục chỉ có nội dung).
             const sections = tbBody.split('|').map(s => s.trim()).filter(Boolean);
 
             const container = new ContainerBuilder().setAccentColor(accent);
+            // ⚠️ Components V2 KHÔNG cho kèm message.content -> @everyone phải nằm TRONG component (TextDisplay).
+            // Vẫn cần allowedMentions.parse=['everyone'] ở payload thì mention mới THẬT SỰ kêu.
+            if (pingEveryone) {
+                container.addTextDisplayComponents(new TextDisplayBuilder().setContent('@everyone'));
+            }
             // Tiêu đề lớn ở đầu.
             container.addTextDisplayComponents(new TextDisplayBuilder().setContent(`# ${tbTitle}`));
             container.addSeparatorComponents(new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Large).setDivider(true));
@@ -6879,15 +6889,13 @@ client.on('interactionCreate', async interaction => {
                 container.addTextDisplayComponents(new TextDisplayBuilder().setContent(`-# ${tbFooter}`));
             }
 
-            // @everyone chỉ được phép khi người dùng CÓ quyền Mention Everyone (tránh lạm dụng).
-            const payload = { components: [container], flags: MessageFlags.IsComponentsV2 };
-            if (pingEveryone) {
-                if (!member.permissions?.has(PermissionFlagsBits.MentionEveryone) && !member.permissions?.has(PermissionFlagsBits.Administrator)) {
-                    return interaction.editReply({ content: '❌ Bạn cần quyền **Nhắc mọi người (@everyone)** để bật tùy chọn này.' });
-                }
-                payload.content = '@everyone';
-                payload.allowedMentions = { parse: ['everyone'] };
-            }
+            // @everyone: KHÔNG set payload.content (Components V2 cấm) — text đã nằm trong container ở trên.
+            // Chỉ cần allowedMentions để mention THẬT SỰ kêu; mặc định tắt hết mention để không ping ngoài ý muốn.
+            const payload = {
+                components: [container],
+                flags: MessageFlags.IsComponentsV2,
+                allowedMentions: pingEveryone ? { parse: ['everyone'] } : { parse: [] }
+            };
 
             const sent = await targetChannel.send(payload).catch(err => {
                 console.error('❌ [ThongBao] Không gửi được:', err.message);
