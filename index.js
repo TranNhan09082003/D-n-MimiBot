@@ -1811,7 +1811,21 @@ try {
 }
 try {
     const ffmpegPath = require('ffmpeg-static');
-    if (ffmpegPath) process.env.FFMPEG_PATH = ffmpegPath;
+    if (ffmpegPath) {
+        process.env.FFMPEG_PATH = ffmpegPath;
+        // 🔧 SỬA LỖI "spawn .../ffmpeg-static/ffmpeg EACCES":
+        // Khi deploy qua SFTP (như VibeHost), file binary được copy lên nhưng MẤT bit
+        // thực thi (executable) -> Node spawn ffmpeg bị từ chối quyền (EACCES) -> không
+        // phát được nhạc/đọc tin. Host dạng panel thường KHÔNG cho chạy `chmod` trên console,
+        // nên ta tự cấp quyền thực thi cho ffmpeg ngay lúc khởi động (chỉ trên POSIX/Linux).
+        if (process.platform !== 'win32') {
+            try {
+                fs.chmodSync(ffmpegPath, 0o755);
+            } catch (e) {
+                console.warn('⚠️ [Music] Không thể cấp quyền thực thi cho ffmpeg tại ' + ffmpegPath + ':', e.message);
+            }
+        }
+    }
 } catch {
     console.warn('⚠️ [TTS] Chưa cài ffmpeg-static — tính năng đọc tin nhắn có thể không phát được âm thanh.');
 }
