@@ -127,9 +127,11 @@ function startInternalApi(deps) {
     // Ưu tiên MIMI_API_PORT (đặt thủ công). Nếu trống, dùng port Pterodactyl/VibeHost
     // cấp qua SERVER_PORT (bot Discord không cần port inbound nên port này đang rảnh).
     const PORT = Number(process.env.MIMI_API_PORT || process.env.SERVER_PORT || 8787);
-    // Trên panel, phải bind vào IP nội bộ container (SERVER_IP) hoặc 0.0.0.0 thì
-    // port mới được map ra ngoài. 127.0.0.1 chỉ hợp khi web cùng máy với bot.
-    const HOST = process.env.MIMI_API_HOST || process.env.SERVER_IP || '0.0.0.0';
+    // Bind địa chỉ. LƯU Ý: SERVER_IP trên Pterodactyl là IP CÔNG KHAI (địa chỉ
+    // quảng bá), KHÔNG bind được bên trong container → gây EADDRNOTAVAIL.
+    // Phải bind 0.0.0.0 để nhận mọi interface; port (SERVER_PORT) vẫn được map ra ngoài.
+    // Chỉ đổi qua MIMI_API_HOST khi web chạy cùng máy (dùng 127.0.0.1).
+    const HOST = process.env.MIMI_API_HOST || '0.0.0.0';
 
     if (!TOKEN) {
         logger.warn('⚠️ [InternalAPI] Chưa đặt token — API nội bộ sẽ KHÔNG khởi động (an toàn: tránh mở cổng không xác thực).');
