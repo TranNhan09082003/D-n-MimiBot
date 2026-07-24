@@ -4178,6 +4178,17 @@ client.once('ready', async () => {
             .addStringOption(o => o.setName('tieu_de').setDescription('Tiêu đề thông báo (mặc định: 📢 Thông Báo Từ MI BOT)').setRequired(false).setMaxLength(200)),
 
         new SlashCommandBuilder()
+            .setName('thongbao')
+            .setDescription('Gửi thông báo CHIA MỤC (đẹp, nhiều phần) vào một kênh trong server')
+            .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+            .addChannelOption(o => o.setName('kênh').setDescription('Kênh sẽ đăng thông báo').addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement).setRequired(true))
+            .addStringOption(o => o.setName('tiêu_đề').setDescription('Tiêu đề lớn ở đầu thông báo').setRequired(true).setMaxLength(200))
+            .addStringOption(o => o.setName('nội_dung').setDescription('Các mục, cách nhau bằng " | ". Mỗi mục dạng "Tiêu đề mục :: nội dung"').setRequired(true).setMaxLength(3500))
+            .addStringOption(o => o.setName('màu').setDescription('Màu viền (hex, VD: #5865F2). Mặc định: xanh Discord').setRequired(false).setMaxLength(7))
+            .addStringOption(o => o.setName('chân_trang').setDescription('Dòng ghi chú nhỏ ở cuối (tùy chọn)').setRequired(false).setMaxLength(300))
+            .addBooleanOption(o => o.setName('gắn_mọi_người').setDescription('Có gắn @everyone kèm thông báo không? (mặc định: Không)').setRequired(false)),
+
+        new SlashCommandBuilder()
             .setName('setprefix')
             .setDescription('Thay đổi tiền tố lệnh prefix cho server này (mặc định: mi)')
             .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
@@ -6770,6 +6781,92 @@ client.on('interactionCreate', async interaction => {
         // 📢 LỆNH /broadcast — Chỉ Owner, chỉ tại server cố định
         // Gửi thông báo tới tất cả server bot đang tham gia
         // ==========================================
+        if (commandName === 'thongbao') {
+            if (!interaction.guild) {
+                return interaction.reply({ content: '🚫 Lệnh này chỉ dùng được trong server.', ephemeral: true });
+            }
+            const guild = interaction.guild;
+            const member = interaction.member;
+            // Quyền: đã khóa ở setDefaultMemberPermissions(ManageGuild), kiểm tra thêm cho chắc.
+            if (!member.permissions?.has(PermissionFlagsBits.ManageGuild) && !member.permissions?.has(PermissionFlagsBits.Administrator)) {
+                return interaction.reply({ content: '🚫 Bạn cần quyền **Quản lý Server** để dùng lệnh này.', ephemeral: true });
+            }
+            await interaction.deferReply({ ephemeral: true });
+
+            const targetChannel = options.getChannel('kênh');
+            const tbTitle = options.getString('tiêu_đề');
+            const tbBody = options.getString('nội_dung');
+            const tbFooter = options.getString('chân_trang');
+            const pingEveryone = options.getBoolean('gắn_mọi_người') || false;
+
+            // Phân tích màu hex (#RRGGBB) -> số nguyên; mặc định xanh Discord nếu sai định dạng.
+            let accent = 0x5865F2;
+            const rawColor = options.getString('màu');
+            if (rawColor) {
+                const m = rawColor.trim().match(/^#?([0-9a-fA-F]{6})$/);
+                if (m) accent = parseInt(m[1], 16);
+            }
+
+            // Kiểm tra quyền bot ở kênh đích.
+            const me = guild.members.me;
+            const perms = targetChannel.permissionsFor(me);
+            if (!perms?.has(PermissionFlagsBits.ViewChannel) || !perms?.has(PermissionFlagsBits.SendMessages)) {
+                return interaction.editReply({ content: `❌ Bot không có quyền **Xem** hoặc **Gửi tin** trong ${targetChannel}.` });
+            }
+
+            // Tách các MỤC bằng dấu "|". Mỗi mục: "Tiêu đề mục :: nội dung" (không có "::" -> mục chỉ có nội dung).
+            const sections = tbBody.split('|').map(s => s.trim()).filter(Boolean);
+
+            const container = new ContainerBuilder().setAccentColor(accent);
+            // Tiêu đề lớn ở đầu.
+            container.addTextDisplayComponents(new TextDisplayBuilder().setContent(`# ${tbTitle}`));
+            container.addSeparatorComponents(new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Large).setDivider(true));
+
+            if (sections.length === 0) {
+                container.addTextDisplayComponents(new TextDisplayBuilder().setContent('*(Không có nội dung)*'));
+            } else {
+                sections.forEach((sec, idx) => {
+                    const sepIndex = sec.indexOf('::');
+                    let content;
+                    if (sepIndex >= 0) {
+                        const secTitle = sec.slice(0, sepIndex).trim();
+                        const secBody = sec.slice(sepIndex + 2).trim().replace(/\\n/g, '\n');
+                        content = `## ${secTitle}\n${secBody}`;
+                    } else {
+                        content = sec.replace(/\\n/g, '\n');
+                    }
+                    container.addTextDisplayComponents(new TextDisplayBuilder().setContent(content.slice(0, 3900)));
+                    // Vạch ngăn giữa các mục (không thêm sau mục cuối).
+                    if (idx < sections.length - 1) {
+                        container.addSeparatorComponents(new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true));
+                    }
+                });
+            }
+
+            if (tbFooter) {
+                container.addSeparatorComponents(new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Large).setDivider(true));
+                container.addTextDisplayComponents(new TextDisplayBuilder().setContent(`-# ${tbFooter}`));
+            }
+
+            // @everyone chỉ được phép khi người dùng CÓ quyền Mention Everyone (tránh lạm dụng).
+            const payload = { components: [container], flags: MessageFlags.IsComponentsV2 };
+            if (pingEveryone) {
+                if (!member.permissions?.has(PermissionFlagsBits.MentionEveryone) && !member.permissions?.has(PermissionFlagsBits.Administrator)) {
+                    return interaction.editReply({ content: '❌ Bạn cần quyền **Nhắc mọi người (@everyone)** để bật tùy chọn này.' });
+                }
+                payload.content = '@everyone';
+                payload.allowedMentions = { parse: ['everyone'] };
+            }
+
+            const sent = await targetChannel.send(payload).catch(err => {
+                console.error('❌ [ThongBao] Không gửi được:', err.message);
+                return null;
+            });
+            if (!sent) return interaction.editReply({ content: '❌ Gửi thông báo thất bại (kiểm tra lại quyền của bot ở kênh đó).' });
+
+            return interaction.editReply({ content: `✅ Đã đăng thông báo **${sections.length} mục** vào ${targetChannel}.` });
+        }
+
         if (commandName === 'broadcast') {
             if (interaction.user.id !== OWNER_ID) {
                 return interaction.reply({ content: '🚫 Lệnh này chỉ dành riêng cho Owner của bot.', ephemeral: true });
@@ -8314,6 +8411,8 @@ client.on('interactionCreate', async interaction => {
                 fields: [
                     { name: '`misay [nội dung]` hoặc `mis [nội dung]`', value: 'Bot gửi lại đúng nội dung đó trong kênh hiện tại, đồng thời **tự xóa tin nhắn gốc** của Admin.\nDùng để thông báo "thay mặt" server mà không lộ danh tính.' },
                     { name: '💡 Ví dụ', value: '`mis 🔔 Server sẽ bảo trì vào 22:00 tối nay, mọi người lưu ý nhé!`\n→ Bot xóa tin nhắn đó và gửi lại thông báo sạch sẽ.' },
+                    { name: '📣 `/thongbao` (Thông báo CHIA MỤC — đẹp, nhiều phần)', value: 'Gửi thông báo dạng khối cao cấp, tự chia nhiều mục có tiêu đề riêng.\n• `kênh` — nơi đăng thông báo\n• `tiêu_đề` — tiêu đề lớn ở đầu\n• `nội_dung` — các mục cách nhau bằng ` | `, mỗi mục dạng `Tiêu đề mục :: nội dung`\n• `màu` (tùy chọn) — viền HEX, VD `#5865F2`\n• `chân_trang` (tùy chọn) — ghi chú nhỏ ở cuối\n• `gắn_mọi_người` (tùy chọn) — kèm @everyone (cần quyền Nhắc mọi người)\nYêu cầu quyền **Quản Lý Server**.' },
+                    { name: '💡 Ví dụ `/thongbao`', value: '`nội_dung:` `Sự kiện :: Đua top cuối tuần! | Phần thưởng :: 10.000 xu cho top 1 | Lưu ý :: Kết thúc 23:59 Chủ Nhật`\n→ Ra thông báo 3 mục gọn gàng, có vạch ngăn.' },
                 ]
             },
             help_giveaway: {
