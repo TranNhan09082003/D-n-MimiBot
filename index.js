@@ -3349,8 +3349,10 @@ async function playNextTrack(guildId, opts = {}) {
             let ffErr = '';
             ff.stderr?.on('data', (c) => { ffErr += c.toString(); if (ffErr.length > 2000) ffErr = ffErr.slice(-2000); });
             ff.on('error', (e) => console.error(`❌ [Music] ffmpeg lỗi ở server ${guildId}:`, e.message));
-            // Trong lúc chờ, người dùng có thể đã Skip/Stop -> bỏ qua
-            if (mq.current !== next) { try { ff.kill('SIGKILL'); } catch { /* bỏ qua */ } clearTransition(); return; }
+            // Trong lúc chờ, người dùng có thể đã Skip/Stop/seek/đổi hiệu ứng -> bỏ qua. Dùng genId (thế
+            // hệ phát) thay cho so sánh object: khi replayCurrent (seek/hiệu ứng) thì next === mq.current
+            // nên so object KHÔNG phát hiện được lần gọi mới chen vào -> tạo 2 resource/ffmpeg cùng lúc.
+            if (mq.playGeneration !== genId) { try { ff.kill('SIGKILL'); } catch { /* bỏ qua */ } return; }
             resource = voiceLib.createAudioResource(ff.stdout, { inputType: voiceLib.StreamType.Raw, inlineVolume: true });
         } else {
             // ⚡ ĐƯỜNG OPUS PASSTHROUGH (mặc định, nhẹ CPU): demuxProbe nhận đúng loại rồi truyền thẳng.
@@ -3359,9 +3361,10 @@ async function playNextTrack(guildId, opts = {}) {
             // m4a/aac. Khi đó bộ giải mã WebmOpus hỏng ngay -> resource kết thúc tức thì -> bài bị "nuốt".
             // demuxProbe đọc thử vài byte đầu để nhận đúng loại (opus/ogg/khác).
             const probe = await voiceLib.demuxProbe(audioBuffer);
-            if (mq.current !== next) {
+            // Dùng genId thay so sánh object (xem ghi chú ở nhánh ffmpeg): bắt được cả trường hợp
+            // replayCurrent (next === mq.current) khi có lần gọi mới chen vào giữa lúc chờ demuxProbe.
+            if (mq.playGeneration !== genId) {
                 try { probe.stream.destroy(); } catch { /* đã hủy */ }
-                clearTransition();
                 return;
             }
             // 🔊 LUÔN bật inlineVolume để nút Tăng/Giảm âm CHỈNH TỨC THÌ (setVolume) mà KHÔNG phải
@@ -3371,8 +3374,6 @@ async function playNextTrack(guildId, opts = {}) {
         if (resource.volume) resource.volume.setVolume(mq.volume);
         mq.currentResource = resource;
         mq.player.play(resource);
-        // ✅ Phát bài thành công -> reset bộ đếm lỗi liên tiếp (circuit-breaker chống spam lỗi).
-        mq.consecutiveFailures = 0;
         // ⚠️ KHÔNG tắt cờ transitioning NGAY tại đây. killCurrentProcess ở đầu hàm hủy buffer bài cũ,
         // nhưng AudioPlayer chỉ phát hiện điều đó ở nhịp audio-frame KẾ TIẾP (~20ms SAU dòng play này)
         // rồi mới nhả Idle "ảo". Nếu tắt cờ ngay, Idle ảo đó lọt qua listener -> bot tưởng bài đã hết
@@ -3382,6 +3383,10 @@ async function playNextTrack(guildId, opts = {}) {
         const onPlayingClear = () => {
             clearTimeout(transitionSafety);
             clearTransition();
+            // ✅ CHỈ reset bộ đếm lỗi khi bài THẬT SỰ phát được (vào trạng thái Playing), KHÔNG reset ngay
+            // sau play(). Nếu reset sau play() thì bài "tải được vài byte rồi premature close" vẫn kịp reset
+            // về 0 trước khi lỗi async tới -> cầu dao dao động 0→1→0→1, không bao giờ chạm ngưỡng -> spam lỗi.
+            mq.consecutiveFailures = 0;
         };
         mq.player.once(voiceLib.AudioPlayerStatus.Playing, onPlayingClear);
         const transitionSafety = setTimeout(() => {
@@ -3466,16 +3471,15 @@ function handlePlaybackFailure(guildId, mq, failedTrack, shortErr) {
     mq.current = null;
     mq.currentResource = null;
 
-    // CHUYỂN BÀI KẾ TIẾP an toàn:
-    // - Player còn Playing/Paused (bài lỗi vẫn giữ chỗ): stop() -> Idle -> listener tự gọi playNextTrack.
-    // - Player ĐÃ Idle (lỗi 403: bài trước xong, player về Idle RỒI mới tải bài lỗi): stop() KHÔNG phát
-    //   Idle mới -> hàng đợi treo. Phải gọi thẳng playNextTrack.
-    const status = mq.player.state.status;
-    if (status === voiceLib.AudioPlayerStatus.Idle) {
-        playNextTrack(guildId);
-    } else {
-        mq.player.stop();
-    }
+    // ⚠️ GỠ CỜ transitioning trước khi chuyển bài. Nếu bài lỗi ngay lúc đang Buffering (chưa từng vào
+    // Playing — hay gặp trên đường ffmpeg/403), sự kiện Playing chưa fire nên cờ transitioning VẪN true.
+    // Nếu để nguyên rồi gọi player.stop() -> Idle listener thấy transitioning=true -> return (bỏ qua) ->
+    // hàng đợi TREO HẲN (đúng lỗi "đổi hiệu ứng/seek vào bài hỏng thì bot đứng im"). Vì vậy gỡ cờ rồi
+    // gọi THẲNG playNextTrack (playNextTrack tự killCurrentProcess + bật lại cờ cho thế hệ mới).
+    mq.transitioning = false;
+    playNextTrack(guildId).catch(err => {
+        console.error(`❌ [Music] Lỗi khi chuyển bài sau thất bại ở server ${guildId}:`, err?.message || err);
+    });
 }
 
 // Lấy music queue hiện có của server, hoặc tạo kết nối voice mới nếu chưa có.
@@ -3571,7 +3575,16 @@ async function getOrCreateMusicQueue(guild, voiceChannel, textChannel) {
                 voiceLib.entersState(connection, voiceLib.VoiceConnectionStatus.Connecting, 5000),
             ]);
         } catch {
-            connection.destroy();
+            // ⚠️ Dọn TRIỆT ĐỂ trước khi xoá mq — nếu không sẽ RÒ RỈ: tiến trình yt-dlp/ffmpeg con tiếp tục
+            // chạy (orphan), và progressTimer (setInterval 7s) chạy mãi vì sau musicQueues.delete thì
+            // stopProgressUpdater không còn tham chiếu tới timer để clear. Mỗi lần bị disconnect lại tích thêm.
+            const m = musicQueues.get(guild.id);
+            if (m) {
+                if (m.idleTimeout) { try { clearTimeout(m.idleTimeout); } catch { /* bỏ qua */ } }
+                try { killCurrentProcess(m); } catch { /* bỏ qua */ }
+                try { m.player.stop(); } catch { /* bỏ qua */ }
+            }
+            try { connection.destroy(); } catch { /* có thể đã destroy */ }
             musicQueues.delete(guild.id);
             musicStore.clearSession(guild.id);
         }
@@ -8782,7 +8795,11 @@ client.on('interactionCreate', async interaction => {
                 }
                 await interaction.deferUpdate().catch(() => null);
                 await playNextTrack(guild.id, { replayCurrent: true, seekSec: target, effectKey: mq.effect || 'none' });
-                if (mq.nowPlayingMessage) mq.nowPlayingMessage.edit(buildMusicPayload(mq)).catch(() => null);
+                // Re-fetch sau await: bài có thể đã kết thúc / bot rời kênh (mq bị xoá) trong lúc chờ.
+                const mqAfterSeek = musicQueues.get(guild.id);
+                if (mqAfterSeek?.current && mqAfterSeek.nowPlayingMessage) {
+                    mqAfterSeek.nowPlayingMessage.edit(buildMusicPayload(mqAfterSeek)).catch(() => null);
+                }
                 return;
             }
 
@@ -8790,7 +8807,11 @@ client.on('interactionCreate', async interaction => {
             if (customId === 'music_restart') {
                 await interaction.deferUpdate().catch(() => null);
                 await playNextTrack(guild.id, { replayCurrent: true, seekSec: 0, effectKey: mq.effect || 'none' });
-                if (mq.nowPlayingMessage) mq.nowPlayingMessage.edit(buildMusicPayload(mq)).catch(() => null);
+                // Re-fetch sau await: bài có thể đã kết thúc / bot rời kênh (mq bị xoá) trong lúc chờ.
+                const mqAfterRestart = musicQueues.get(guild.id);
+                if (mqAfterRestart?.current && mqAfterRestart.nowPlayingMessage) {
+                    mqAfterRestart.nowPlayingMessage.edit(buildMusicPayload(mqAfterRestart)).catch(() => null);
+                }
                 return;
             }
 
