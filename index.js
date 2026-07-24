@@ -2231,7 +2231,9 @@ async function findRadioTrack(seedTrack, playedUrls) {
             title: e.title || 'Không rõ tiêu đề',
             url,
             duration: Number(e.duration) || 0,
-            thumbnail: (Array.isArray(e.thumbnails) ? e.thumbnails[e.thumbnails.length - 1]?.url : null) || `https://i.ytimg.com/vi/${vid}/hqdefault.jpg`
+            thumbnail: (Array.isArray(e.thumbnails) ? e.thumbnails[e.thumbnails.length - 1]?.url : null) || `https://i.ytimg.com/vi/${vid}/hqdefault.jpg`,
+            author: e.uploader || e.channel || null, // hiển thị nghệ sĩ/kênh trên panel
+            source: 'YouTube'                          // radio chỉ lấy từ YouTube Mix
         };
     }
     return null;
@@ -2944,16 +2946,57 @@ function startProgressUpdater(guildId) {
     const mq = musicQueues.get(guildId);
     if (!mq) return;
     stopProgressUpdater(mq); // dọn timer cũ (nếu có) trước khi mở timer mới
-    mq.progressTimer = setInterval(() => {
+    mq.progressEditing = false; // chưa có edit nào đang bay
+    mq.progressTimer = setInterval(async () => {
         const m = musicQueues.get(guildId);
-        // Điều kiện dừng: hết queue/không còn bài, mất tin nhắn, hoặc player không còn phát
-        if (!m || !m.current || !m.nowPlayingMessage) { stopProgressUpdater(m); return; }
+        // Điều kiện dừng: hết queue/không còn bài, hoặc player không còn phát.
+        if (!m || !m.current) { stopProgressUpdater(m); return; }
         const status = m.player.state.status;
         if (status !== voiceLib.AudioPlayerStatus.Playing && status !== voiceLib.AudioPlayerStatus.Paused) {
             stopProgressUpdater(m);
             return;
         }
-        m.nowPlayingMessage.edit(buildMusicPayload(m)).catch(() => null);
+        // 🩹 TỰ HỒI PHỤC panel: nếu đang phát mà KHÔNG còn tin panel (lần tạo ban đầu thất bại -> lỗi "mở
+        // nhạc 5 lần 1 lần không ra bảng điều khiển", hoặc panel bị xóa -> lỗi "mất bảng điều khiển mà bot
+        // vẫn hát") thì gửi lại panel mới thay vì dừng cập nhật.
+        if (!m.nowPlayingMessage) {
+            if (m.progressEditing || !m.textChannel) return;
+            m.progressEditing = true;
+            try {
+                const fresh = await m.textChannel.send(buildMusicPayload(m)).catch(() => null);
+                const cur = musicQueues.get(guildId);
+                if (cur && fresh) cur.nowPlayingMessage = fresh;
+            } finally {
+                const cur = musicQueues.get(guildId);
+                if (cur) cur.progressEditing = false;
+            }
+            return;
+        }
+        // 🚦 Chống dồn edit: nếu lần edit trước CHƯA xong (host/Discord chậm hoặc bị rate-limit) thì BỎ QUA
+        // nhịp này. Không có guard, các edit dồn hàng đợi rồi tới nơi LỘN THỨ TỰ -> panel hiện bài cũ dù đã
+        // sang bài mới (lỗi "qua bài vẫn hiện bài vừa hát"), và càng nghe lâu càng lag.
+        if (m.progressEditing) return;
+        // Chốt lại bài đang phát TẠI THỜI ĐIỂM build payload; nếu trong lúc await mà đã chuyển bài thì bỏ
+        // kết quả cũ đi (không ghi đè panel bài mới bằng dữ liệu bài cũ).
+        const trackAtBuild = m.current;
+        const payload = buildMusicPayload(m);
+        m.progressEditing = true;
+        try {
+            const ok = await m.nowPlayingMessage.edit(payload).catch(() => null);
+            const cur = musicQueues.get(guildId);
+            if (!cur) return;
+            if (!ok) {
+                // Edit thất bại (tin bị xóa / mất quyền) -> gửi LẠI panel mới để không "mất bảng điều khiển
+                // mà bot vẫn hát". Chỉ gửi lại khi vẫn đúng bài đang phát.
+                if (cur.current === trackAtBuild && cur.textChannel) {
+                    const fresh = await cur.textChannel.send(buildMusicPayload(cur)).catch(() => null);
+                    if (fresh) cur.nowPlayingMessage = fresh;
+                }
+            }
+        } finally {
+            const cur = musicQueues.get(guildId);
+            if (cur) cur.progressEditing = false;
+        }
     }, 7000);
 }
 
@@ -3281,26 +3324,8 @@ async function playNextTrack(guildId, opts = {}) {
         ytdlProcess.catch((err) => {
             if (mq.current !== next) return; // đã chuyển bài khác, bỏ qua lỗi cũ
             console.error(`❌ [Music] yt-dlp lỗi khi phát "${next.title}" ở server ${guildId}:`, stderrBuffer || err.message);
-            if (mq.textChannel) {
-                const shortErr = (stderrBuffer.split('\n').filter(Boolean).pop() || err.message || 'Không rõ lỗi').slice(0, 300);
-                mq.textChannel.send(buildMusicNoticePayload(
-                    'Không thể phát bài này',
-                    `Bài **${next.title}** gặp lỗi:\n> \`${shortErr}\`\n\nĐang **tự động chuyển** sang bài kế tiếp trong hàng đợi.`,
-                    0xE74C3C
-                )).catch(() => null);
-            }
-            // CHUYỂN BÀI KẾ TIẾP:
-            // - Nếu player còn đang Playing/Paused (bài lỗi vẫn "giữ chỗ"): stop() -> phát sự kiện
-            //   Idle -> listener Idle tự gọi playNextTrack.
-            // - Nếu player ĐÃ Idle (rất hay gặp với lỗi 403: bài trước đã phát xong, player về Idle
-            //   RỒI mới tải bài này bị lỗi): stop() KHÔNG phát Idle mới -> hàng đợi TREO, không tự
-            //   chuyển. Đây chính là bug "không tự chuyển tiếp bài trong hàng đợi". Phải gọi thẳng.
-            const status = mq.player.state.status;
-            if (status === voiceLib.AudioPlayerStatus.Idle) {
-                playNextTrack(guildId);
-            } else {
-                mq.player.stop();
-            }
+            const shortErr = (stderrBuffer.split('\n').filter(Boolean).pop() || err.message || 'Không rõ lỗi').slice(0, 300);
+            handlePlaybackFailure(guildId, mq, next, shortErr);
         });
 
         mq.currentProcess = ytdlProcess;
@@ -3346,10 +3371,23 @@ async function playNextTrack(guildId, opts = {}) {
         if (resource.volume) resource.volume.setVolume(mq.volume);
         mq.currentResource = resource;
         mq.player.play(resource);
-        // ✅ Đã cấp resource mới cho player -> tắt cờ transitioning. Idle "ảo" của buffer cũ (nếu có)
-        // đã xảy ra trong lúc await demuxProbe/ffmpeg ở trên và bị bỏ qua; từ đây Idle THẬT (bài mới
-        // kết thúc / stream hỏng) lại được phép chuyển bài như bình thường.
-        clearTransition();
+        // ✅ Phát bài thành công -> reset bộ đếm lỗi liên tiếp (circuit-breaker chống spam lỗi).
+        mq.consecutiveFailures = 0;
+        // ⚠️ KHÔNG tắt cờ transitioning NGAY tại đây. killCurrentProcess ở đầu hàm hủy buffer bài cũ,
+        // nhưng AudioPlayer chỉ phát hiện điều đó ở nhịp audio-frame KẾ TIẾP (~20ms SAU dòng play này)
+        // rồi mới nhả Idle "ảo". Nếu tắt cờ ngay, Idle ảo đó lọt qua listener -> bot tưởng bài đã hết
+        // -> lược bài / mất hàng đợi (đúng các lỗi đã gặp). Vì vậy CHỈ tắt cờ khi resource MỚI thật sự
+        // vào trạng thái Playing. Kèm timeout an toàn để cờ KHÔNG BAO GIỜ bị kẹt (nếu resource lỗi,
+        // không phát được) — tránh lỗi "đổi/tắt hiệu ứng xong queue treo, phải ngắt bot".
+        const onPlayingClear = () => {
+            clearTimeout(transitionSafety);
+            clearTransition();
+        };
+        mq.player.once(voiceLib.AudioPlayerStatus.Playing, onPlayingClear);
+        const transitionSafety = setTimeout(() => {
+            try { mq.player.off(voiceLib.AudioPlayerStatus.Playing, onPlayingClear); } catch { /* bỏ qua */ }
+            clearTransition();
+        }, 8000);
 
         // Dùng LẠI chính tin nhắn trạng thái (VD "Đang tải...") làm tin "Đang phát" bằng cách EDIT nó.
         // NGUYÊN NHÂN bug "thông báo vẫn Đang tải nhưng đã phát nhạc": trước đây tin trạng thái là 1
@@ -3368,8 +3406,58 @@ async function playNextTrack(guildId, opts = {}) {
         startProgressUpdater(guildId); // Bắt đầu cập nhật thanh tiến trình LIVE
     } catch (err) {
         console.error(`❌ [Music] Lỗi phát nhạc ở server ${guildId}:`, err.message);
-        if (mq.textChannel) mq.textChannel.send(buildMusicNoticePayload('Lỗi khi phát', `Bài **${next.title}** gặp lỗi:\n> \`${err.message}\`\n\nĐang **tự động bỏ qua** bài này.`, 0xE74C3C)).catch(() => null);
-        return playNextTrack(guildId);
+        clearTransition(); // tránh kẹt cờ transitioning khi khởi tạo resource ném lỗi
+        handlePlaybackFailure(guildId, mq, next, (err.message || 'Không rõ lỗi').slice(0, 300));
+        return;
+    }
+}
+
+// 🧯 Xử lý bài phát LỖI có kiểm soát — chống "spam lỗi liên tục" khi nhiều bài liên tiếp cùng hỏng
+// (VD hết hạn URL / 403 hàng loạt). Dùng bộ đếm consecutiveFailures làm CẦU DAO (circuit-breaker):
+//   • Mỗi bài lỗi: tăng bộ đếm, gửi TỐI ĐA 1 thông báo cho tới ngưỡng.
+//   • Chạm ngưỡng (5 bài liên tiếp): DỪNG hẳn thay vì tiếp tục nhảy bài vô hạn (chính là vòng lặp
+//     spam lỗi khiến người dùng phải xóa kênh mới hết).
+//   • Bài phát THÀNH CÔNG sẽ reset bộ đếm về 0 (xem playNextTrack).
+const MAX_CONSECUTIVE_FAILURES = 5;
+function handlePlaybackFailure(guildId, mq, failedTrack, shortErr) {
+    if (!mq || mq.current !== failedTrack) return; // đã chuyển bài khác -> bỏ qua lỗi cũ
+    mq.consecutiveFailures = (mq.consecutiveFailures || 0) + 1;
+
+    // Chạm ngưỡng -> ngắt vòng lặp, dừng phát, KHÔNG spam thêm.
+    if (mq.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        mq.queue = [];
+        mq.current = null;
+        mq.currentResource = null;
+        killCurrentProcess(mq);
+        if (mq.textChannel) {
+            mq.textChannel.send(buildMusicNoticePayload(
+                'Đã dừng vì lỗi liên tục',
+                `Nhiều bài liên tiếp không phát được (đã thử **${mq.consecutiveFailures}** bài).\n> Có thể do mạng/nguồn tạm lỗi. Hãy thử lại sau bằng \`/play\`.`,
+                0xE74C3C
+            )).catch(() => null);
+        }
+        try { mq.player.stop(); } catch { /* bỏ qua */ }
+        musicStore.clearSession(guildId);
+        return;
+    }
+
+    // Chưa chạm ngưỡng -> báo 1 lần rồi chuyển bài kế tiếp.
+    if (mq.textChannel) {
+        mq.textChannel.send(buildMusicNoticePayload(
+            'Không thể phát bài này',
+            `Bài **${failedTrack.title}** gặp lỗi:\n> \`${shortErr}\`\n\nĐang **tự động chuyển** sang bài kế tiếp.`,
+            0xE74C3C
+        )).catch(() => null);
+    }
+    // CHUYỂN BÀI KẾ TIẾP an toàn:
+    // - Player còn Playing/Paused (bài lỗi vẫn giữ chỗ): stop() -> Idle -> listener tự gọi playNextTrack.
+    // - Player ĐÃ Idle (lỗi 403: bài trước xong, player về Idle RỒI mới tải bài lỗi): stop() KHÔNG phát
+    //   Idle mới -> hàng đợi treo. Phải gọi thẳng playNextTrack.
+    const status = mq.player.state.status;
+    if (status === voiceLib.AudioPlayerStatus.Idle) {
+        playNextTrack(guildId);
+    } else {
+        mq.player.stop();
     }
 }
 
@@ -3434,7 +3522,8 @@ async function getOrCreateMusicQueue(guild, voiceChannel, textChannel) {
         stay247: false,         // ở lại kênh 24/7, không auto-leave
         skipVotes: new Set(),   // ID người đã bỏ phiếu bỏ qua bài hiện tại (reset mỗi khi chuyển bài)
         lastSeed: null,         // track gốc để tạo radio khi autoplay (bài người dùng phát gần nhất)
-        playedUrls: new Set()   // url đã phát trong phiên — tránh autoplay lặp vòng tròn
+        playedUrls: new Set(),  // url đã phát trong phiên — tránh autoplay lặp vòng tròn
+        consecutiveFailures: 0  // bộ đếm bài lỗi liên tiếp (cầu dao chống spam lỗi — xem handlePlaybackFailure)
     };
     musicQueues.set(guild.id, mq);
 
@@ -3448,10 +3537,14 @@ async function getOrCreateMusicQueue(guild, voiceChannel, textChannel) {
     });
     player.on('error', (err) => {
         console.error(`❌ [Music] Player error ở server ${guild.id}:`, err.message);
-        if (mq.textChannel && mq.current) {
-            mq.textChannel.send(buildMusicNoticePayload('Lỗi phát nhạc', `Bài **${mq.current.title}** gặp lỗi:\n> \`${err.message}\`\n\nĐang **tự động chuyển** bài kế tiếp.`, 0xE74C3C)).catch(() => null);
+        const m = musicQueues.get(guild.id);
+        if (!m) return;
+        // Đi qua cầu dao chống spam lỗi giống nhánh yt-dlp/ffmpeg (thay vì gọi thẳng playNextTrack vô hạn).
+        if (m.current) {
+            handlePlaybackFailure(guild.id, m, m.current, (err.message || 'Không rõ lỗi').slice(0, 300));
+        } else {
+            playNextTrack(guild.id);
         }
-        playNextTrack(guild.id);
     });
     connection.on(voiceLib.VoiceConnectionStatus.Disconnected, async () => {
         try {
