@@ -3421,6 +3421,16 @@ async function playNextTrack(guildId, opts = {}) {
 const MAX_CONSECUTIVE_FAILURES = 5;
 function handlePlaybackFailure(guildId, mq, failedTrack, shortErr) {
     if (!mq || mq.current !== failedTrack) return; // đã chuyển bài khác -> bỏ qua lỗi cũ
+
+    // 🔁 CHỐNG SPAM LỖI TRÙNG (nguyên nhân "Premature close" lặp lại hàng loạt):
+    // MỘT lần phát hỏng có thể nhả lỗi từ NHIỀU nguồn gần như đồng thời — tiến trình yt-dlp thoát,
+    // stream ffmpeg/PassThrough báo "Premature close", và AudioPlayer bắn sự kiện 'error'. Mỗi nguồn
+    // đều gọi hàm này, mà lúc đó mq.current VẪN là bài lỗi -> guard ở trên KHÔNG chặn được -> gửi hàng
+    // loạt thông báo "Lỗi phát nhạc" y hệt nhau (đúng ảnh người dùng gửi). Vì vậy chỉ cho phép xử lý
+    // lỗi ĐÚNG MỘT LẦN cho mỗi "thế hệ phát" (playGeneration tăng mỗi lần playNextTrack chạy).
+    if (mq.failureHandledGen === mq.playGeneration) return;
+    mq.failureHandledGen = mq.playGeneration;
+
     mq.consecutiveFailures = (mq.consecutiveFailures || 0) + 1;
 
     // Chạm ngưỡng -> ngắt vòng lặp, dừng phát, KHÔNG spam thêm.
@@ -3449,6 +3459,13 @@ function handlePlaybackFailure(guildId, mq, failedTrack, shortErr) {
             0xE74C3C
         )).catch(() => null);
     }
+
+    // ⚠️ BỎ HẲN bài lỗi trước khi chuyển: đặt mq.current = null để playNextTrack KHÔNG áp lặp
+    // (loop 'track' vốn unshift lại mq.current -> nếu không xoá sẽ phát lại chính bài hỏng gây LẶP VÔ TẬN
+    // bài lỗi). Đồng thời khiến mọi lỗi tới muộn của bài này rơi vào guard mq.current !== failedTrack.
+    mq.current = null;
+    mq.currentResource = null;
+
     // CHUYỂN BÀI KẾ TIẾP an toàn:
     // - Player còn Playing/Paused (bài lỗi vẫn giữ chỗ): stop() -> Idle -> listener tự gọi playNextTrack.
     // - Player ĐÃ Idle (lỗi 403: bài trước xong, player về Idle RỒI mới tải bài lỗi): stop() KHÔNG phát
@@ -3523,7 +3540,8 @@ async function getOrCreateMusicQueue(guild, voiceChannel, textChannel) {
         skipVotes: new Set(),   // ID người đã bỏ phiếu bỏ qua bài hiện tại (reset mỗi khi chuyển bài)
         lastSeed: null,         // track gốc để tạo radio khi autoplay (bài người dùng phát gần nhất)
         playedUrls: new Set(),  // url đã phát trong phiên — tránh autoplay lặp vòng tròn
-        consecutiveFailures: 0  // bộ đếm bài lỗi liên tiếp (cầu dao chống spam lỗi — xem handlePlaybackFailure)
+        consecutiveFailures: 0, // bộ đếm bài lỗi liên tiếp (cầu dao chống spam lỗi — xem handlePlaybackFailure)
+        failureHandledGen: -1   // "thế hệ phát" gần nhất đã xử lý lỗi — chống spam lỗi trùng (Premature close)
     };
     musicQueues.set(guild.id, mq);
 
@@ -8193,17 +8211,23 @@ client.on('interactionCreate', async interaction => {
         }
 
         if (commandName === 'queue') {
+            // defer NGAY để không bao giờ lỡ cửa sổ ack 3 giây (tránh "Ứng dụng không phản hồi" khi
+            // event loop đang bận — VD lúc đang xử lý lỗi/tải nhạc).
+            await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => null);
             const mq = musicQueues.get(guild.id);
             if (!mq || (!mq.current && mq.queue.length === 0)) {
-                return interaction.reply(buildMusicNoticeEphemeral('Hàng đợi trống', 'Hiện **không có bài hát nào** trong hàng đợi.'));
+                return interaction.editReply({
+                    components: [buildMusicNoticeContainer('Hàng đợi trống', 'Hiện **không có bài hát nào** trong hàng đợi.')],
+                    flags: MessageFlags.IsComponentsV2
+                }).catch(() => null);
             }
             const body =
                 (mq.current ? `**Đang phát:** [${mq.current.title}](${mq.current.url})\n\n` : '') +
                 `**Tiếp theo:**\n${buildQueueListText(mq)}`;
-            return interaction.reply({
+            return interaction.editReply({
                 components: [buildMusicNoticeContainer('Hàng đợi nhạc', body), ...buildQueueRemoveRow(mq)],
-                flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral
-            });
+                flags: MessageFlags.IsComponentsV2
+            }).catch(() => null);
         }
     }
 
@@ -8725,16 +8749,22 @@ client.on('interactionCreate', async interaction => {
             }
 
             if (customId === 'music_queue') {
+                // defer NGAY để không lỡ cửa sổ ack 3 giây (chính là lỗi "Ứng dụng không phản hồi"
+                // khi bấm nút Hàng đợi lúc event loop đang bận xử lý lỗi/tải nhạc).
+                await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => null);
                 if (mq.queue.length === 0) {
-                    return interaction.reply(buildMusicNoticeEphemeral('Hàng đợi trống', 'Hiện **không có bài nào** trong hàng đợi tiếp theo.'));
+                    return interaction.editReply({
+                        components: [buildMusicNoticeContainer('Hàng đợi trống', 'Hiện **không có bài nào** trong hàng đợi tiếp theo.')],
+                        flags: MessageFlags.IsComponentsV2
+                    }).catch(() => null);
                 }
-                return interaction.reply({
+                return interaction.editReply({
                     components: [
                         buildMusicNoticeContainer('Hàng đợi tiếp theo', buildQueueListText(mq)),
                         ...buildQueueRemoveRow(mq)
                     ],
-                    flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral
-                });
+                    flags: MessageFlags.IsComponentsV2
+                }).catch(() => null);
             }
 
             // ⏪⏩ TUA NHANH ±10s — phát lại bài hiện tại từ vị trí mới (giữ hiệu ứng đang áp).
