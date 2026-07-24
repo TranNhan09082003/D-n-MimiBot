@@ -7274,7 +7274,7 @@ client.on('interactionCreate', async interaction => {
             const introEmbed = new EmbedBuilder()
                 .setColor('#5865F2')
                 .setAuthor({ name: client.user.username, iconURL: client.user.displayAvatarURL() })
-                .setTitle('👋 Xin chào! Mình là MI BOT')
+                .setTitle('👋 Xin chào! Mình là MimiBot')
                 .setDescription(
                     '> Mình là bot đa năng được thiết kế riêng để hỗ trợ quản lý và vận hành cộng đồng Discord của bạn.\n\n' +
                     '**Mình có thể làm được những gì?**\n' +
@@ -7283,6 +7283,7 @@ client.on('interactionCreate', async interaction => {
                     '🎭 Phân vai trò bằng Emoji Reaction\n' +
                     '🕒 Chấm công và báo cáo giờ làm hàng tuần\n' +
                     '📢 Công cụ thông báo ẩn danh cho Admin\n' +
+                    '🎵 Nghe nhạc đa nền tảng — hiệu ứng live, autoplay, 24/7, lyrics\n' +
                     '🎰 Hệ thống giải trí & cày cuốc XP/xu\n\n' +
                     '👇 **Chọn một danh mục bên dưới để xem hướng dẫn chi tiết:**'
                 )
@@ -7355,8 +7356,8 @@ client.on('interactionCreate', async interaction => {
                         .setValue('help_game')
                         .setEmoji('🎰'),
                     new StringSelectMenuOptionBuilder()
-                        .setLabel('Nghe Nhạc YouTube')
-                        .setDescription('Tìm và phát nhạc từ YouTube, điều khiển bằng nút bấm')
+                        .setLabel('Nghe Nhạc')
+                        .setDescription('Phát nhạc đa nền tảng: hiệu ứng, autoplay, 24/7, lyrics...')
                         .setValue('help_music')
                         .setEmoji('🎵'),
                     new StringSelectMenuOptionBuilder()
@@ -8391,15 +8392,18 @@ client.on('interactionCreate', async interaction => {
                 ]
             },
             help_music: {
-                emoji: '🎵', title: 'Nghe Nhạc YouTube',
+                emoji: '🎵', title: 'Nghe Nhạc',
                 color: '#1DB954',
-                desc: 'Tìm và phát nhạc trực tiếp từ YouTube trong kênh thoại. Toàn bộ điều khiển thao tác qua **nút bấm**, không cần gõ lệnh thêm.',
+                desc: 'Tìm và phát nhạc trực tiếp từ **YouTube, SoundCloud, Spotify, Bandcamp, Twitch, Vimeo**... trong kênh thoại. Panel **Đang phát** hiển thị thanh tiến trình trực tiếp và toàn bộ điều khiển bằng **nút bấm**.',
                 fields: [
-                    { name: '`/play [từ_khóa]` hoặc `miplay` / `mipl` *(prefix)*', value: 'Bạn cần đang ở trong **kênh thoại** trước.\nNhập tên bài hát để bot tự tìm trên YouTube, hoặc dán thẳng **link YouTube**.\nNếu đang có bài phát → bài mới được thêm vào **hàng đợi**.\nNếu bot đang phát ở kênh khác mà kênh đó **hết người nghe**, bot sẽ tự chuyển sang kênh của bạn.' },
-                    { name: '`/queue`', value: 'Xem nhanh bài đang phát và danh sách hàng đợi kèm **menu xoá bài** (chỉ mình bạn thấy).' },
-                    { name: '🗑️ Xoá bài khỏi hàng đợi', value: 'Mở `/queue` hoặc bấm nút **📜 Hàng đợi**, sau đó chọn bài muốn xoá trong menu — bài đó sẽ bị loại khỏi hàng đợi ngay lập tức.' },
-                    { name: '🎛️ Nút điều khiển (hiện dưới mỗi bài đang phát)', value: '• ⏸️/▶️ **Tạm dừng / Tiếp tục**\n• ⏭️ **Bỏ qua** bài hiện tại\n• ⏹️ **Dừng** hẳn và rời kênh thoại\n• 🔁 **Lặp** — bấm để chuyển vòng: Tắt → Bài hiện tại → Cả hàng đợi\n• 🔉/🔊 **Giảm/Tăng âm lượng** mỗi lần 10%\n• 📜 **Hàng đợi** — xem nhanh các bài tiếp theo + xoá bài' },
-                    { name: '⚠️ Lưu ý', value: '• Chỉ thành viên đang ở **cùng kênh thoại** với bot mới bấm được nút điều khiển hoặc xoá bài trong hàng đợi.\n• Nếu bot đang phát ở kênh khác và kênh đó **vẫn còn người nghe**, bạn cần vào đúng kênh đó mới thêm được bài.\n• Bot tự rời kênh thoại sau **2 phút** nếu hết hàng đợi, hoặc rời ngay nếu không còn ai trong kênh.\n• Cần quyền **Kết nối** và **Nói** trong kênh thoại.' },
+                    { name: '▶️ Phát nhạc — `/play [từ_khóa]` · `miplay` / `mipl`', value: 'Vào **kênh thoại** trước, rồi nhập tên bài (bot tự tìm) hoặc dán **link** trực tiếp.\nĐang có bài phát → bài mới vào **hàng đợi**. Bot đang ở kênh khác mà kênh đó hết người nghe → tự chuyển sang kênh của bạn.' },
+                    { name: '🎛️ Hàng nút điều khiển (4 hàng dưới panel Đang phát)', value: '**Hàng 1:** ▶️/⏸️ Tạm dừng·Tiếp tục • ⏭️ Bỏ qua • ⏹️ Dừng & Thoát • 🔁 Lặp (Tắt→Bài→Hàng đợi)\n**Hàng 2:** 🔉/🔊 Giảm·Tăng âm • 📋 Hàng đợi • 💖 Yêu thích bài đang nghe\n**Hàng 3:** 📻 Autoplay • ♾️ 24/7 • 🎛️ Hiệu ứng • 🎤 Lời bài hát\n**Hàng 4:** ⏪ −10s • ⏩ +10s • 🔄 Phát lại từ đầu • 🔀 Xáo trộn • 🗑️ Xoá hàng đợi' },
+                    { name: '🎚️ Hiệu ứng âm thanh — nút 🎛️ · `mifx` / `mihieuung`', value: 'Áp **live** ngay tại vị trí đang nghe (không cắt nhạc): Bassboost, Nightcore, Chill Lofi, Vaporwave, 8D, Soft/Warm, Tremolo, Sped 1.5x, hoặc **Tắt** để về gốc.' },
+                    { name: '📻 Autoplay & ♾️ 24/7', value: '**Autoplay** (nút 📻 · `miradio`): hết hàng đợi bot tự phát bài liên quan.\n**24/7** (nút ♾️ · `mistay`): bot ở lại kênh kể cả khi hết bài / không còn ai nghe.' },
+                    { name: '⏩ Tua & 🔀 Xáo trộn', value: '`/sek [thời_điểm]` · `misek` — tua tới giây/phút bất kỳ (`90`, `1:30`, `1m30s`).\nNút **🔀 Xáo trộn** trộn ngẫu nhiên hàng đợi; **🔄 Phát lại** phát bài hiện tại từ đầu.' },
+                    { name: '💖 Yêu thích & 📁 Album cá nhân', value: '`/yeuthich` · nút 💖 · `mifav` — xem/​phát danh sách bài đã tim.\n`/album` · `mialbum` — tạo album riêng, thêm bài đang nghe, phát lại cả album bất cứ lúc nào.' },
+                    { name: '🎤 Lời bài hát & 📋 Hàng đợi', value: 'Nút 🎤 · `milyrics` — lấy lời bài đang phát (miễn phí qua lrclib).\n`/queue` hoặc nút 📋 — xem hàng đợi kèm **menu xoá từng bài** (chỉ mình bạn thấy).' },
+                    { name: '⚠️ Lưu ý', value: '• Chỉ thành viên **cùng kênh thoại** với bot (hoặc **DJ**/quản trị viên nếu server đã đặt DJ role) mới điều khiển được.\n• Bot tự rời sau **2 phút** khi hết hàng đợi (trừ khi bật 24/7), hoặc rời ngay khi không còn ai nghe.\n• Cần quyền **Kết nối** và **Nói** trong kênh thoại.' },
                 ]
             },
             help_voiceroom: {
