@@ -34,14 +34,14 @@ html {
 body {
   background: var(--mimi-night);
   color: var(--mimi-text);
-  font-family: var(--font-be-vietnam), system-ui, -apple-system, sans-serif;
+  font-family: var(--font-mimi), system-ui, -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   overflow-x: hidden;
 }
 
 h1, h2, h3, h4, .font-display {
-  font-family: var(--font-sora), var(--font-be-vietnam), sans-serif;
+  font-family: var(--font-mimi), system-ui, sans-serif;
   letter-spacing: -0.02em;
 }
 

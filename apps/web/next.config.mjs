@@ -1,5 +1,9 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  // 'standalone' đóng gói server + đúng thư viện runtime vào .next/standalone,
+  // giúp deploy lên hosting không có Terminal / RAM thấp (Nhân Hòa STARTUP 1):
+  // chỉ cần upload + giải nén, KHÔNG cần npm install / npm build trên host.
+  output: 'standalone',
   reactStrictMode: true,
   poweredByHeader: false,
   productionBrowserSourceMaps: false,

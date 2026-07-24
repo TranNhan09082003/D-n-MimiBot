@@ -28,8 +28,8 @@ const config: Config = {
         },
       },
       fontFamily: {
-        display: ["var(--font-sora)", "system-ui", "sans-serif"],
-        sans: ["var(--font-be-vietnam)", "system-ui", "sans-serif"],
+        display: ["var(--font-mimi)", "system-ui", "sans-serif"],
+        sans: ["var(--font-mimi)", "system-ui", "sans-serif"],
         mono: ["var(--font-jetbrains)", "ui-monospace", "monospace"],
       },
       borderRadius: {

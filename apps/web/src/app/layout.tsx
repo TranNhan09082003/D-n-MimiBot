@@ -1,24 +1,20 @@
 import type { Metadata, Viewport } from "next";
-import { Sora, Be_Vietnam_Pro, JetBrains_Mono } from "next/font/google";
+import { Plus_Jakarta_Sans, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 import { env } from "@/lib/env";
 import { Header } from "@/components/layout/header";
 import { Footer } from "@/components/layout/footer";
 
-const sora = Sora({
-  subsets: ["latin"],
-  weight: ["500", "600", "700", "800"],
-  variable: "--font-sora",
-  display: "swap",
-});
-
-const beVietnam = Be_Vietnam_Pro({
+// Font chính — hỗ trợ đầy đủ tiếng Việt (subset "vietnamese"). Dùng cho cả
+// body lẫn tiêu đề để chỉ có MỘT nguồn font, tránh lệch chữ/nhấp nháy.
+const jakarta = Plus_Jakarta_Sans({
   subsets: ["latin", "vietnamese"],
-  weight: ["300", "400", "500", "600", "700"],
-  variable: "--font-be-vietnam",
+  weight: ["400", "500", "600", "700", "800"],
+  variable: "--font-mimi",
   display: "swap",
 });
 
+// Chỉ dùng cho code, ID server, số liệu độ trễ (latency) — giữ chữ đơn cách.
 const jetbrains = JetBrains_Mono({
   subsets: ["latin"],
   weight: ["400", "500", "600"],
@@ -64,7 +60,7 @@ export const viewport: Viewport = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="vi" className={`${sora.variable} ${beVietnam.variable} ${jetbrains.variable}`}>
+    <html lang="vi" className={`${jakarta.variable} ${jetbrains.variable}`}>
       <body className="mimi-noise min-h-screen antialiased">
         <div className="mimi-bg" aria-hidden />
         <a href="#main" className="skip-link">

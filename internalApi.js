@@ -122,8 +122,12 @@ function startInternalApi(deps) {
     } = deps;
 
     const TOKEN = (process.env.MIMI_API_TOKEN || '').trim();
-    const PORT = Number(process.env.MIMI_API_PORT || 8787);
-    const HOST = process.env.MIMI_API_HOST || '0.0.0.0';
+    // Ưu tiên MIMI_API_PORT (đặt thủ công). Nếu trống, dùng port Pterodactyl/VibeHost
+    // cấp qua SERVER_PORT (bot Discord không cần port inbound nên port này đang rảnh).
+    const PORT = Number(process.env.MIMI_API_PORT || process.env.SERVER_PORT || 8787);
+    // Trên panel, phải bind vào IP nội bộ container (SERVER_IP) hoặc 0.0.0.0 thì
+    // port mới được map ra ngoài. 127.0.0.1 chỉ hợp khi web cùng máy với bot.
+    const HOST = process.env.MIMI_API_HOST || process.env.SERVER_IP || '0.0.0.0';
 
     if (!TOKEN) {
         logger.warn('⚠️ [InternalAPI] Chưa đặt MIMI_API_TOKEN — API nội bộ sẽ KHÔNG khởi động (an toàn: tránh mở cổng không xác thực).');
